@@ -13,10 +13,8 @@ from playwright.async_api import async_playwright
 URL = "https://www.coinglass.com/liquidations"
 
 SCAN_SECONDS = 300
-
 VALUE_THRESHOLD = 5_000_000.0
 TRADES_THRESHOLD = 500
-
 TOP_N = 12
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -127,11 +125,10 @@ def get_gap(long_value, short_value):
 
 def update_state(metric, symbol, long_value, short_value):
 
-    threshold = (
-        VALUE_THRESHOLD
-        if metric == "VALUE"
-        else TRADES_THRESHOLD
-    )
+    if metric == "VALUE":
+        threshold = VALUE_THRESHOLD
+    else:
+        threshold = TRADES_THRESHOLD
 
     gap, side = get_gap(
         long_value,
@@ -180,7 +177,7 @@ def update_state(metric, symbol, long_value, short_value):
         return
 
     # --------------------------------------------------------
-    # NEW QUALIFYING CONDITION
+    # FIRST QUALIFYING OBSERVATION
     # --------------------------------------------------------
 
     if not old["active"]:
@@ -195,7 +192,8 @@ def update_state(metric, symbol, long_value, short_value):
 
         print(
             "\n"
-            "============================================================"
+            "============================================================",
+            flush=True,
         )
 
         if metric == "VALUE":
@@ -232,7 +230,7 @@ def update_state(metric, symbol, long_value, short_value):
         return
 
     # --------------------------------------------------------
-    # DIRECT SIDE CHANGE
+    # SIDE FLIP
     # --------------------------------------------------------
 
     if old["side"] != side:
@@ -259,7 +257,7 @@ def update_state(metric, symbol, long_value, short_value):
 
         return
 
-    # Same active condition -> no duplicate
+    # Same active condition = no duplicate
     metric_states[symbol] = old
 
 
@@ -269,7 +267,7 @@ def update_state(metric, symbol, long_value, short_value):
 
 async def find_liquidation_table(page):
 
-    # Wait for the important header first.
+    # First wait for the header.
     await page.get_by_text(
         "1h Long",
         exact=True,
@@ -292,6 +290,7 @@ async def find_liquidation_table(page):
         table = tables.nth(i)
 
         try:
+
             text = clean_text(
                 await table.inner_text(
                     timeout=3000
@@ -323,14 +322,14 @@ async def find_liquidation_table(page):
 
 
 # ============================================================
-# EXTRACT ONE ROW
+# EXTRACT STANDARD ROW
 # ============================================================
 
 async def extract_row_from_cells(cells):
 
     cell_count = await cells.count()
 
-    if cell_count < 6:
+    if cell_count < 5:
         return None
 
     texts = []
@@ -338,6 +337,7 @@ async def extract_row_from_cells(cells):
     for j in range(cell_count):
 
         try:
+
             txt = clean_text(
                 await cells.nth(j).inner_text(
                     timeout=2000
@@ -349,80 +349,79 @@ async def extract_row_from_cells(cells):
 
         texts.append(txt)
 
-    # --------------------------------------------------------
-    # Layout A:
+    # Layout:
     # Ranking | Assets | Price | 24h% | 1h Long | 1h Short
     #
-    # Layout B:
-    # Assets | Price | 24h% | 1h Long | 1h Short ...
-    # --------------------------------------------------------
+    # OR:
+    # Assets | Price | 24h% | 1h Long | 1h Short
 
-    if len(texts) >= 6:
+    if len(texts) >= 6 and re.fullmatch(
+        r"#?\d+",
+        texts[0],
+    ):
 
-        first = texts[0]
+        asset_index = 1
+        long_index = 4
+        short_index = 5
 
-        # Ranking usually numeric.
-        if re.fullmatch(r"#?\d+", first):
+    elif len(texts) >= 5:
 
-            asset_index = 1
-            long_index = 4
-            short_index = 5
+        asset_index = 0
+        long_index = 3
+        short_index = 4
 
-        else:
+    else:
+        return None
 
-            asset_index = 0
-            long_index = 3
-            short_index = 4
+    if max(
+        asset_index,
+        long_index,
+        short_index,
+    ) >= len(texts):
+        return None
 
-        if max(
-            asset_index,
-            long_index,
-            short_index,
-        ) >= len(texts):
+    asset_text = texts[asset_index]
+    long_text = texts[long_index]
+    short_text = texts[short_index]
 
-            return None
+    tokens = re.findall(
+        r"[A-Z][A-Z0-9]{1,14}",
+        asset_text.upper(),
+    )
 
-        asset_text = texts[asset_index]
-        long_text = texts[long_index]
-        short_text = texts[short_index]
+    ignored = {
+        "USD",
+        "USDT",
+        "PRICE",
+        "LONG",
+        "SHORT",
+        "ASSETS",
+    }
 
-        tokens = re.findall(
-            r"[A-Z][A-Z0-9]{1,14}",
-            asset_text.upper(),
-        )
+    tokens = [
+        token
+        for token in tokens
+        if token not in ignored
+    ]
 
-        if not tokens:
-            return None
+    if not tokens:
+        return None
 
-        # Remove obvious non-symbol words.
-        ignored = {
-            "USD",
-            "USDT",
-            "PRICE",
-            "LONG",
-            "SHORT",
-            "ASSETS",
-        }
+    if not re.search(r"\d", long_text):
+        return None
 
-        tokens = [
-            x for x in tokens
-            if x not in ignored
-        ]
+    if not re.search(r"\d", short_text):
+        return None
 
-        if not tokens:
-            return None
+    symbol = tokens[-1]
 
-        symbol = tokens[-1]
-
-        return {
-            "symbol": symbol,
-            "long": parse_number(long_text),
-            "short": parse_number(short_text),
-            "long_raw": long_text,
-            "short_raw": short_text,
-        }
-
-    return None
+    return {
+        "symbol": symbol,
+        "long": parse_number(long_text),
+        "short": parse_number(short_text),
+        "long_raw": long_text,
+        "short_raw": short_text,
+    }
 
 
 # ============================================================
@@ -435,13 +434,9 @@ async def read_1h_rows(page):
 
     results = []
 
-    # ========================================================
-    # METHOD 1
-    # Standard TR rows
-    #
-    # IMPORTANT:
-    # Do NOT require tbody.
-    # ========================================================
+    # --------------------------------------------------------
+    # METHOD 1 — STANDARD TR
+    # --------------------------------------------------------
 
     rows = table.locator("tr")
 
@@ -455,7 +450,6 @@ async def read_1h_rows(page):
     for i in range(row_count):
 
         row = rows.nth(i)
-
         cells = row.locator("td")
 
         parsed = await extract_row_from_cells(
@@ -478,14 +472,13 @@ async def read_1h_rows(page):
 
         return results
 
-    # ========================================================
-    # METHOD 2
-    # ARIA / role rows
-    # ========================================================
+    # --------------------------------------------------------
+    # METHOD 2 — ROLE ROW
+    # --------------------------------------------------------
 
     print(
         "[DEBUG] TR parsing empty. "
-        "Trying role=row fallback...",
+        "Trying role=row...",
         flush=True,
     )
 
@@ -530,16 +523,12 @@ async def read_1h_rows(page):
 
         return results
 
-    # ========================================================
-    # METHOD 3
-    # Browser-side generic rendered row discovery.
-    #
-    # This handles tables where CoinGlass uses DIV-based rows.
-    # ========================================================
+    # --------------------------------------------------------
+    # METHOD 3 — GENERIC DIV FALLBACK
+    # --------------------------------------------------------
 
     print(
-        "[DEBUG] Role parsing empty. "
-        "Trying generic rendered-row fallback...",
+        "[DEBUG] Trying generic rendered rows...",
         flush=True,
     )
 
@@ -549,12 +538,11 @@ async def read_1h_rows(page):
 
             const output = [];
 
-            const elements =
-                Array.from(
-                    root.querySelectorAll(
-                        'tr, [role="row"], div'
-                    )
-                );
+            const elements = Array.from(
+                root.querySelectorAll(
+                    'tr, [role="row"], div'
+                )
+            );
 
             for (const el of elements) {
 
@@ -568,17 +556,15 @@ async def read_1h_rows(page):
                     continue;
                 }
 
-                const cells =
-                    children.map(
-                        x => (
-                            x.innerText || ""
-                        ).trim()
-                    );
+                const cells = children.map(
+                    x => (
+                        x.innerText || ""
+                    ).trim()
+                );
 
                 const joined =
                     cells.join(" ");
 
-                // Ignore header
                 if (
                     /1h\\s*long/i.test(joined) &&
                     /1h\\s*short/i.test(joined)
@@ -586,12 +572,9 @@ async def read_1h_rows(page):
                     continue;
                 }
 
-                // Candidate needs at least some
-                // numeric data.
                 const numeric =
                     cells.filter(
-                        x =>
-                            /\\d/.test(x)
+                        x => /\\d/.test(x)
                     ).length;
 
                 if (numeric < 3) {
@@ -619,20 +602,12 @@ async def read_1h_rows(page):
         if len(texts) < 5:
             continue
 
-        # Try both known layouts.
         candidates = []
 
         if len(texts) >= 6:
+            candidates.append((1, 4, 5))
 
-            candidates.append(
-                (1, 4, 5)
-            )
-
-        if len(texts) >= 5:
-
-            candidates.append(
-                (0, 3, 4)
-            )
+        candidates.append((0, 3, 4))
 
         for (
             asset_index,
@@ -645,7 +620,6 @@ async def read_1h_rows(page):
                 long_index,
                 short_index,
             ) >= len(texts):
-
                 continue
 
             asset_text = clean_text(
@@ -665,29 +639,38 @@ async def read_1h_rows(page):
                 asset_text.upper(),
             )
 
-            if not tokens:
-                continue
-
-            symbol = tokens[-1]
-
-            if symbol in {
+            ignored = {
                 "USD",
                 "USDT",
                 "PRICE",
                 "LONG",
                 "SHORT",
                 "ASSETS",
-            }:
+            }
+
+            tokens = [
+                token
+                for token in tokens
+                if token not in ignored
+            ]
+
+            if not tokens:
                 continue
+
+            symbol = tokens[-1]
 
             if symbol in seen:
                 continue
 
-            # Require numeric Long/Short cells.
-            if (
-                not re.search(r"\d", long_text)
-                or
-                not re.search(r"\d", short_text)
+            if not re.search(
+                r"\d",
+                long_text,
+            ):
+                continue
+
+            if not re.search(
+                r"\d",
+                short_text,
             ):
                 continue
 
@@ -714,9 +697,10 @@ async def read_1h_rows(page):
 
     if not results:
 
-        # Diagnostic only.
         body_text = clean_text(
-            await page.locator("body").inner_text()
+            await page.locator(
+                "body"
+            ).inner_text()
         )
 
         print(
@@ -747,7 +731,7 @@ async def read_1h_rows(page):
 
 
 # ============================================================
-# DROPDOWN
+# DROPDOWN VALUE -> TRADES
 # ============================================================
 
 async def select_liquidation_trades(page):
@@ -809,7 +793,6 @@ async def select_liquidation_trades(page):
 
     await trades_option.click()
 
-    # Give React enough time to redraw rows.
     await page.wait_for_timeout(3500)
 
     print(
@@ -847,32 +830,19 @@ def sanity_check(
         for x in trade_rows
     }
 
-    common = (
-        value_symbols
-        .intersection(trade_symbols)
+    common = value_symbols.intersection(
+        trade_symbols
     )
 
     if len(common) < 3:
-
         raise RuntimeError(
             "VALUE/TRADES tables "
             "do not appear to match"
         )
 
-    for row in trade_rows:
-
-        if (
-            row["long"] < 0
-            or row["short"] < 0
-        ):
-
-            raise RuntimeError(
-                "Invalid negative trade count"
-            )
-
 
 # ============================================================
-# PRINT CURRENT SCAN
+# PRINT SCAN
 # ============================================================
 
 def print_scan(metric, rows):
@@ -929,16 +899,31 @@ async def scan_once(page):
     )
 
     # --------------------------------------------------------
-    # REFRESH PAGE
+    # LOAD / REFRESH COINGLASS
     # --------------------------------------------------------
 
-    await page.goto(
+    response = await page.goto(
         URL,
         wait_until="domcontentloaded",
         timeout=60000,
     )
 
-    # Dynamic data load.
+    # --------------------------------------------------------
+    # HTTP DIAGNOSTICS
+    # --------------------------------------------------------
+
+    print(
+        f"[HTTP] status="
+        f"{response.status if response else 'NO RESPONSE'}",
+        flush=True,
+    )
+
+    print(
+        f"[HTTP] final_url={page.url}",
+        flush=True,
+    )
+
+    # Give dynamic page time to render.
     await page.wait_for_timeout(8000)
 
     print(
@@ -960,7 +945,7 @@ async def scan_once(page):
     )
 
     # --------------------------------------------------------
-    # SWITCH TO TRADES
+    # SWITCH VALUE -> TRADES
     # --------------------------------------------------------
 
     await select_liquidation_trades(
@@ -981,7 +966,7 @@ async def scan_once(page):
     )
 
     # --------------------------------------------------------
-    # VERIFY BEFORE STATE UPDATE
+    # VERIFY
     # --------------------------------------------------------
 
     sanity_check(
@@ -990,7 +975,7 @@ async def scan_once(page):
     )
 
     # --------------------------------------------------------
-    # VALUE STATES
+    # UPDATE VALUE STATES
     # --------------------------------------------------------
 
     for row in value_rows:
@@ -1003,7 +988,7 @@ async def scan_once(page):
         )
 
     # --------------------------------------------------------
-    # TRADES STATES
+    # UPDATE TRADES STATES
     # --------------------------------------------------------
 
     for row in trade_rows:
