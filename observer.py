@@ -13,8 +13,10 @@ from playwright.async_api import async_playwright
 URL = "https://www.coinglass.com/liquidations"
 
 SCAN_SECONDS = 300
+
 VALUE_THRESHOLD = 5_000_000.0
 TRADES_THRESHOLD = 500
+
 TOP_N = 12
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -31,13 +33,11 @@ states = {
 
 
 # ============================================================
-# HELPERS
+# BASIC HELPERS
 # ============================================================
 
 def now_ist():
-    return datetime.now(IST).strftime(
-        "%d-%m-%Y %H:%M:%S IST"
-    )
+    return datetime.now(IST).strftime("%d-%m-%Y %H:%M:%S IST")
 
 
 def clean_text(value):
@@ -53,7 +53,6 @@ def clean_text(value):
 
 
 def parse_number(text):
-
     s = clean_text(text).upper()
 
     if not s:
@@ -65,10 +64,7 @@ def parse_number(text):
         .replace("−", "-")
     )
 
-    match = re.search(
-        r"-?\d+(?:\.\d+)?",
-        s,
-    )
+    match = re.search(r"-?\d+(?:\.\d+)?", s)
 
     if not match:
         return 0.0
@@ -88,7 +84,6 @@ def parse_number(text):
 
 
 def fmt_money(value):
-
     value = float(value)
 
     if abs(value) >= 1_000_000_000:
@@ -108,7 +103,6 @@ def fmt_count(value):
 
 
 def get_gap(long_value, short_value):
-
     signed_gap = long_value - short_value
     gap = abs(signed_gap)
 
@@ -128,12 +122,7 @@ def get_gap(long_value, short_value):
 # STATE ENGINE
 # ============================================================
 
-def update_state(
-    metric,
-    symbol,
-    long_value,
-    short_value,
-):
+def update_state(metric, symbol, long_value, short_value):
 
     threshold = (
         VALUE_THRESHOLD
@@ -141,14 +130,9 @@ def update_state(
         else TRADES_THRESHOLD
     )
 
-    gap, side = get_gap(
-        long_value,
-        short_value,
-    )
+    gap, side = get_gap(long_value, short_value)
 
-    metric_states = states[metric]
-
-    old = metric_states.get(
+    old = states[metric].get(
         symbol,
         {
             "active": False,
@@ -162,6 +146,10 @@ def update_state(
         and side != "EVEN"
     )
 
+    # --------------------------------------------------------
+    # CONDITION NO LONGER ACTIVE
+    # --------------------------------------------------------
+
     if not qualifies:
 
         if old["active"]:
@@ -174,7 +162,7 @@ def update_state(
                 flush=True,
             )
 
-        metric_states[symbol] = {
+        states[metric][symbol] = {
             "active": False,
             "side": None,
             "first_observed": None,
@@ -182,11 +170,15 @@ def update_state(
 
         return
 
+    # --------------------------------------------------------
+    # NEW CONDITION
+    # --------------------------------------------------------
+
     if not old["active"]:
 
         first_time = now_ist()
 
-        metric_states[symbol] = {
+        states[metric][symbol] = {
             "active": True,
             "side": side,
             "first_observed": first_time,
@@ -230,11 +222,15 @@ def update_state(
 
         return
 
+    # --------------------------------------------------------
+    # OPPOSITE SIDE WHILE STILL ABOVE THRESHOLD
+    # --------------------------------------------------------
+
     if old["side"] != side:
 
         first_time = now_ist()
 
-        metric_states[symbol] = {
+        states[metric][symbol] = {
             "active": True,
             "side": side,
             "first_observed": first_time,
@@ -246,57 +242,30 @@ def update_state(
             f"COIN: {symbol}\n"
             f"OLD SIDE: {old['side']}\n"
             f"NEW SIDE: {side}\n"
-            f"NEW FIRST OBSERVED: {first_time}\n"
+            f"FIRST OBSERVED: {first_time}\n"
             "============================================================",
             flush=True,
         )
 
         return
 
-    metric_states[symbol] = old
+    # Same active condition = no duplicate alert
+    states[metric][symbol] = old
 
 
 # ============================================================
-# PAGE HELPERS
+# PAGE TEXT
 # ============================================================
-
-async def wait_for_liquidation_section(page):
-
-    await page.get_by_text(
-        "Total Liquidations",
-        exact=False,
-    ).first.wait_for(
-        state="visible",
-        timeout=30000,
-    )
-
-    await page.get_by_text(
-        "1h Long",
-        exact=True,
-    ).last.wait_for(
-        state="visible",
-        timeout=30000,
-    )
-
-    print(
-        "[PAGE] Total Liquidations section visible",
-        flush=True,
-    )
-
 
 async def get_rendered_lines(page):
 
-    body_text = await page.locator(
-        "body"
-    ).inner_text(
-        timeout=10000
+    body_text = await page.locator("body").inner_text(
+        timeout=15000
     )
-
-    raw_lines = body_text.splitlines()
 
     lines = []
 
-    for line in raw_lines:
+    for line in body_text.splitlines():
 
         line = clean_text(line)
 
@@ -309,6 +278,22 @@ async def get_rendered_lines(page):
     )
 
     return lines
+
+
+async def wait_for_liquidation_section(page):
+
+    await page.get_by_text(
+        "Total Liquidations",
+        exact=False,
+    ).first.wait_for(
+        state="visible",
+        timeout=30000,
+    )
+
+    print(
+        "[PAGE] Total Liquidations section visible",
+        flush=True,
+    )
 
 
 # ============================================================
@@ -331,6 +316,39 @@ def is_number_like(text):
             r"%?",
             s,
             flags=re.I,
+        )
+    )
+
+
+def is_integer_like(text):
+
+    s = clean_text(text).replace(",", "")
+
+    return bool(
+        re.fullmatch(r"\d+", s)
+    )
+
+
+def is_price_like(text):
+
+    s = clean_text(text)
+
+    return bool(
+        re.fullmatch(
+            r"\$\d[\d,]*(?:\.\d+)?",
+            s,
+        )
+    )
+
+
+def is_percent_like(text):
+
+    s = clean_text(text)
+
+    return bool(
+        re.fullmatch(
+            r"[+\-−]?\d+(?:\.\d+)?%",
+            s,
         )
     )
 
@@ -367,7 +385,7 @@ def is_symbol_like(text):
 
 
 # ============================================================
-# VALUE HEADER FINDER
+# VALUE HEADER
 # ============================================================
 
 def find_value_header(lines):
@@ -404,9 +422,7 @@ def find_value_header(lines):
 
 def parse_value_rows(lines):
 
-    header_index = find_value_header(
-        lines
-    )
+    header_index = find_value_header(lines)
 
     search_lines = lines[
         header_index + 1:
@@ -430,14 +446,11 @@ def parse_value_rows(lines):
         "Liquidation Trades",
     }
 
-    filtered = []
-
-    for item in search_lines:
-
-        if item in ignored_exact:
-            continue
-
-        filtered.append(item)
+    filtered = [
+        item
+        for item in search_lines
+        if item not in ignored_exact
+    ]
 
     results = []
     seen = set()
@@ -452,14 +465,9 @@ def parse_value_rows(lines):
         symbol_index = None
 
         if (
-            re.fullmatch(
-                r"#?\d+",
-                current,
-            )
+            re.fullmatch(r"#?\d+", current)
             and i + 1 < len(filtered)
-            and is_symbol_like(
-                filtered[i + 1]
-            )
+            and is_symbol_like(filtered[i + 1])
         ):
 
             symbol = filtered[i + 1].upper()
@@ -474,7 +482,6 @@ def parse_value_rows(lines):
             symbol is None
             or symbol in seen
         ):
-
             i += 1
             continue
 
@@ -482,29 +489,28 @@ def parse_value_rows(lines):
 
         for j in range(
             symbol_index + 1,
-            min(
-                symbol_index + 20,
-                len(filtered),
-            ),
+            min(symbol_index + 20, len(filtered)),
         ):
 
             candidate = filtered[j]
 
             if (
                 j > symbol_index + 2
-                and re.fullmatch(
-                    r"#?\d+",
-                    candidate,
-                )
+                and re.fullmatch(r"#?\d+", candidate)
                 and j + 1 < len(filtered)
-                and is_symbol_like(
-                    filtered[j + 1]
-                )
+                and is_symbol_like(filtered[j + 1])
             ):
                 break
 
             if is_number_like(candidate):
                 numbers.append(candidate)
+
+        # Expected:
+        # price
+        # 24h %
+        # 1H long
+        # 1H short
+        # ...
 
         if len(numbers) >= 4:
 
@@ -529,12 +535,8 @@ def parse_value_rows(lines):
             results.append(
                 {
                     "symbol": symbol,
-                    "long": parse_number(
-                        long_raw
-                    ),
-                    "short": parse_number(
-                        short_raw
-                    ),
+                    "long": parse_number(long_raw),
+                    "short": parse_number(short_raw),
                     "long_raw": long_raw,
                     "short_raw": short_raw,
                 }
@@ -564,21 +566,6 @@ def parse_value_rows(lines):
     )
 
     return results
-
-
-# ============================================================
-# READ VALUE
-# ============================================================
-
-async def read_value(page):
-
-    lines = await get_rendered_lines(
-        page
-    )
-
-    return parse_value_rows(
-        lines
-    )
 
 
 # ============================================================
@@ -624,7 +611,7 @@ async def select_liquidation_trades(page):
                 break
 
         except Exception:
-            continue
+            pass
 
     if visible_control is None:
 
@@ -633,12 +620,10 @@ async def select_liquidation_trades(page):
         )
 
     await visible_control.click(
-        timeout=10000,
+        timeout=10000
     )
 
-    await page.wait_for_timeout(
-        700
-    )
+    await page.wait_for_timeout(700)
 
     options = page.get_by_text(
         "Liquidation Trades",
@@ -672,7 +657,7 @@ async def select_liquidation_trades(page):
                 break
 
         except Exception:
-            continue
+            pass
 
     if visible_option is None:
 
@@ -681,12 +666,11 @@ async def select_liquidation_trades(page):
         )
 
     await visible_option.click(
-        timeout=10000,
+        timeout=10000
     )
 
-    await page.wait_for_timeout(
-        4000
-    )
+    # Give React/table enough time to replace VALUE data.
+    await page.wait_for_timeout(4000)
 
     print(
         "[DROPDOWN] TRADES selected",
@@ -695,217 +679,141 @@ async def select_liquidation_trades(page):
 
 
 # ============================================================
-# TRADES DEBUG CAPTURE
+# TRADES PARSER
+#
+# Captured rendered structure:
+#
+# SYMBOL
+# PRICE
+# 24H %
+# 1H LONG
+# 1H SHORT
+# 4H LONG
+# 4H SHORT
+# 12H LONG
+# 12H SHORT
+# 24H LONG
+# 24H SHORT
+# RANK
+#
+# Example captured:
+#
+# SPCX
+# $153.58
+# +0.60%
+# 0
+# 1
+# 0
+# 1
+# 0
+# 5
+# 2
+# 15
+# 21
+#
 # ============================================================
 
-async def capture_trades_structure(page):
+def parse_trades_rows(lines):
 
-    lines = await get_rendered_lines(
-        page
-    )
+    results = []
+    seen = set()
 
-    print(
-        "\n"
-        "============================================================\n"
-        "[TRADES DEBUG START]\n"
-        "============================================================",
-        flush=True,
-    )
+    for i in range(len(lines)):
 
-    # Find useful anchors in the Trades view.
-    anchor_indexes = []
+        symbol = lines[i].upper()
 
-    keywords = (
-        "Liquidation Trades",
-        "Ranking",
-        "Assets",
-        "1h",
-        "4h",
-        "12h",
-        "24h",
-        "BTC",
-        "ETH",
-        "SOL",
-    )
+        if not is_symbol_like(symbol):
+            continue
 
-    for i, line in enumerate(lines):
+        # Need at least:
+        # symbol + price + percent + 8 trade fields
+        if i + 10 >= len(lines):
+            continue
 
-        low = line.lower()
+        price = lines[i + 1]
+        percent = lines[i + 2]
 
-        if any(
-            keyword.lower() in low
-            for keyword in keywords
+        if not is_price_like(price):
+            continue
+
+        if not is_percent_like(percent):
+            continue
+
+        trade_fields = lines[
+            i + 3:
+            i + 11
+        ]
+
+        if len(trade_fields) != 8:
+            continue
+
+        if not all(
+            is_integer_like(x)
+            for x in trade_fields
         ):
+            continue
 
-            anchor_indexes.append(i)
+        if symbol in seen:
+            continue
 
-    print(
-        f"[TRADES DEBUG] anchors={anchor_indexes[:40]}",
-        flush=True,
-    )
+        # Captured table order:
+        #
+        # 0 = 1H LONG
+        # 1 = 1H SHORT
+        # 2 = 4H LONG
+        # 3 = 4H SHORT
+        # 4 = 12H LONG
+        # 5 = 12H SHORT
+        # 6 = 24H LONG
+        # 7 = 24H SHORT
 
-    # --------------------------------------------------------
-    # Capture around Liquidation Trades
-    # --------------------------------------------------------
-
-    trade_control_indexes = [
-        i
-        for i, line in enumerate(lines)
-        if "liquidation trades" in line.lower()
-    ]
-
-    print(
-        f"[TRADES DEBUG] "
-        f"Liquidation Trades indexes="
-        f"{trade_control_indexes}",
-        flush=True,
-    )
-
-    printed = set()
-
-    for anchor in trade_control_indexes:
-
-        start = max(
-            0,
-            anchor - 25,
+        long_1h = parse_number(
+            trade_fields[0]
         )
 
-        end = min(
-            len(lines),
-            anchor + 180,
+        short_1h = parse_number(
+            trade_fields[1]
+        )
+
+        seen.add(symbol)
+
+        results.append(
+            {
+                "symbol": symbol,
+                "long": long_1h,
+                "short": short_1h,
+                "price": price,
+                "percent": percent,
+            }
         )
 
         print(
-            f"\n[TRADES DEBUG BLOCK "
-            f"around line {anchor}]",
+            f"[PARSED] TRADES | "
+            f"{symbol} | "
+            f"1H L={fmt_count(long_1h)} | "
+            f"1H S={fmt_count(short_1h)}",
             flush=True,
         )
 
-        for i in range(
-            start,
-            end,
-        ):
+        if len(results) >= TOP_N:
+            break
 
-            if i in printed:
-                continue
+    if not results:
 
-            printed.add(i)
-
-            print(
-                f"[TRADES TEXT {i}] "
-                f"{lines[i]}",
-                flush=True,
-            )
-
-    # --------------------------------------------------------
-    # If Liquidation Trades label isn't present in body text,
-    # capture around BTC/ETH/SOL instead.
-    # --------------------------------------------------------
-
-    if not trade_control_indexes:
-
-        coin_indexes = []
-
-        for i, line in enumerate(lines):
-
-            if line.upper() in {
-                "BTC",
-                "ETH",
-                "SOL",
-            }:
-
-                coin_indexes.append(i)
-
-        print(
-            f"[TRADES DEBUG] "
-            f"BTC/ETH/SOL indexes="
-            f"{coin_indexes[:20]}",
-            flush=True,
+        raise RuntimeError(
+            "No TRADES rows parsed"
         )
-
-        for anchor in coin_indexes[:5]:
-
-            start = max(
-                0,
-                anchor - 30,
-            )
-
-            end = min(
-                len(lines),
-                anchor + 100,
-            )
-
-            print(
-                f"\n[TRADES DEBUG COIN BLOCK "
-                f"around line {anchor}]",
-                flush=True,
-            )
-
-            for i in range(
-                start,
-                end,
-            ):
-
-                if i in printed:
-                    continue
-
-                printed.add(i)
-
-                print(
-                    f"[TRADES TEXT {i}] "
-                    f"{lines[i]}",
-                    flush=True,
-                )
-
-    # --------------------------------------------------------
-    # Last fallback: capture middle portion where Value header
-    # previously appeared (~450 onward).
-    # --------------------------------------------------------
-
-    if not printed:
-
-        start = min(
-            380,
-            len(lines),
-        )
-
-        end = min(
-            700,
-            len(lines),
-        )
-
-        print(
-            "\n[TRADES DEBUG FALLBACK BLOCK]",
-            flush=True,
-        )
-
-        for i in range(
-            start,
-            end,
-        ):
-
-            print(
-                f"[TRADES TEXT {i}] "
-                f"{lines[i]}",
-                flush=True,
-            )
 
     print(
-        "============================================================\n"
-        "[TRADES DEBUG END]\n"
-        "============================================================",
+        f"[DEBUG] TRADES parsed rows={len(results)}",
         flush=True,
     )
 
-    # Intentional diagnostic stop.
-    raise RuntimeError(
-        "TRADES structure captured - "
-        "send TRADES DEBUG logs"
-    )
+    return results
 
 
 # ============================================================
-# PRINT VALUE SCAN
+# OUTPUT
 # ============================================================
 
 def print_value_scan(rows):
@@ -933,9 +841,49 @@ def print_value_scan(rows):
             flush=True,
         )
 
+        update_state(
+            "VALUE",
+            row["symbol"],
+            row["long"],
+            row["short"],
+        )
+
+
+def print_trades_scan(rows):
+
+    print(
+        f"\n[TRADES SCAN] "
+        f"{now_ist()} | "
+        f"rows={len(rows)}",
+        flush=True,
+    )
+
+    for row in rows:
+
+        gap, side = get_gap(
+            row["long"],
+            row["short"],
+        )
+
+        print(
+            f"{row['symbol']:8} "
+            f"L={fmt_count(row['long']):>8} "
+            f"S={fmt_count(row['short']):>8} "
+            f"GAP={fmt_count(gap):>8} "
+            f"{side}",
+            flush=True,
+        )
+
+        update_state(
+            "TRADES",
+            row["symbol"],
+            row["long"],
+            row["short"],
+        )
+
 
 # ============================================================
-# ONE COMPLETE DIAGNOSTIC SCAN
+# ONE SCAN
 # ============================================================
 
 async def scan_once(page):
@@ -948,15 +896,23 @@ async def scan_once(page):
         flush=True,
     )
 
+    # Fresh navigation every cycle.
+    # CoinGlass should return to VALUE view.
+
     response = await page.goto(
         URL,
         wait_until="domcontentloaded",
         timeout=60000,
     )
 
+    status = (
+        response.status
+        if response
+        else None
+    )
+
     print(
-        f"[HTTP] status="
-        f"{response.status if response else 'NO RESPONSE'}",
+        f"[HTTP] status={status}",
         flush=True,
     )
 
@@ -965,67 +921,96 @@ async def scan_once(page):
         flush=True,
     )
 
-    await page.wait_for_timeout(
-        8000
-    )
+    if (
+        response is not None
+        and response.status >= 400
+    ):
+
+        raise RuntimeError(
+            f"CoinGlass HTTP {response.status}"
+        )
+
+    await page.wait_for_timeout(8000)
 
     print(
         f"[PAGE] title={await page.title()}",
         flush=True,
     )
 
-    if (
-        response
-        and response.status >= 400
-    ):
-
-        raise RuntimeError(
-            f"CoinGlass HTTP "
-            f"{response.status}"
-        )
-
     await wait_for_liquidation_section(
         page
     )
 
-    # --------------------------------------------------------
-    # WORKING VALUE SIDE
-    # --------------------------------------------------------
+    # ========================================================
+    # VALUE
+    # ========================================================
 
-    value_rows = await read_value(
+    value_lines = await get_rendered_lines(
         page
+    )
+
+    value_rows = parse_value_rows(
+        value_lines
     )
 
     print_value_scan(
         value_rows
     )
 
-    # --------------------------------------------------------
-    # WORKING DROPDOWN
-    # --------------------------------------------------------
+    # ========================================================
+    # SWITCH TO TRADES
+    # ========================================================
 
     await select_liquidation_trades(
         page
     )
 
-    # --------------------------------------------------------
-    # CAPTURE EXACT TRADES STRUCTURE
-    # --------------------------------------------------------
+    # ========================================================
+    # TRADES
+    # ========================================================
 
-    await capture_trades_structure(
+    trades_lines = await get_rendered_lines(
         page
+    )
+
+    trades_rows = parse_trades_rows(
+        trades_lines
+    )
+
+    print_trades_scan(
+        trades_rows
+    )
+
+    # ========================================================
+    # SUCCESS
+    # ========================================================
+
+    print(
+        "\n############################################################",
+        flush=True,
+    )
+
+    print(
+        f"[SCAN OK] {now_ist()} | "
+        f"VALUE={len(value_rows)} | "
+        f"TRADES={len(trades_rows)}",
+        flush=True,
+    )
+
+    print(
+        "############################################################",
+        flush=True,
     )
 
 
 # ============================================================
-# MAIN
+# MAIN LOOP
 # ============================================================
 
 async def main():
 
     print(
-        "COINGLASS LIQUIDATION OBSERVER "
-        "TRADES DEBUG VERSION",
+        "COINGLASS LIQUIDATION OBSERVER STARTING",
         flush=True,
     )
 
@@ -1035,8 +1020,7 @@ async def main():
     )
 
     print(
-        f"SCAN: every "
-        f"{SCAN_SECONDS} seconds",
+        f"SCAN: every {SCAN_SECONDS} seconds",
         flush=True,
     )
 
@@ -1075,20 +1059,16 @@ async def main():
 
         while True:
 
-            cycle_started = datetime.now(
-                IST
-            )
+            cycle_started = datetime.now(IST)
 
             try:
 
-                await scan_once(
-                    page
-                )
+                await scan_once(page)
 
             except Exception as exc:
 
                 print(
-                    f"\n[SCAN ENDED] "
+                    f"\n[SCAN FAILED] "
                     f"{now_ist()} | "
                     f"{type(exc).__name__}: "
                     f"{exc}",
