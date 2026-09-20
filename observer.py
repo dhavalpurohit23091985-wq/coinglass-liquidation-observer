@@ -1,8 +1,10 @@
 import asyncio
+import os
 import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import requests
 from playwright.async_api import async_playwright
 
 
@@ -13,13 +15,15 @@ from playwright.async_api import async_playwright
 URL = "https://www.coinglass.com/liquidations"
 
 SCAN_SECONDS = 300
+TOP_N = 12
 
 VALUE_THRESHOLD = 5_000_000.0
 TRADES_THRESHOLD = 500
 
-TOP_N = 12
-
 IST = ZoneInfo("Asia/Kolkata")
+
+PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY", "").strip()
+PUSHOVER_APP_TOKEN = os.getenv("PUSHOVER_APP_TOKEN", "").strip()
 
 
 # ============================================================
@@ -73,10 +77,8 @@ def parse_number(text):
 
     if "B" in s:
         value *= 1_000_000_000
-
     elif "M" in s:
         value *= 1_000_000
-
     elif "K" in s:
         value *= 1_000
 
@@ -108,10 +110,8 @@ def get_gap(long_value, short_value):
 
     if signed_gap > 0:
         side = "LONG"
-
     elif signed_gap < 0:
         side = "SHORT"
-
     else:
         side = "EVEN"
 
@@ -119,18 +119,74 @@ def get_gap(long_value, short_value):
 
 
 # ============================================================
-# STATE ENGINE
+# PUSHOVER
+# ============================================================
+
+def pushover_ready():
+    return bool(
+        PUSHOVER_USER_KEY
+        and PUSHOVER_APP_TOKEN
+    )
+
+
+def send_pushover(title, message):
+    if not pushover_ready():
+        print(
+            "[PUSHOVER] Not configured - notification skipped",
+            flush=True,
+        )
+        return False
+
+    try:
+        response = requests.post(
+            "https://api.pushover.net/1/messages.json",
+            data={
+                "token": PUSHOVER_APP_TOKEN,
+                "user": PUSHOVER_USER_KEY,
+                "title": title,
+                "message": message,
+                "priority": 0,
+            },
+            timeout=15,
+        )
+
+        if response.ok:
+            print(
+                f"[PUSHOVER SENT] {title}",
+                flush=True,
+            )
+            return True
+
+        print(
+            f"[PUSHOVER FAILED] HTTP {response.status_code}",
+            flush=True,
+        )
+
+    except Exception as exc:
+        print(
+            f"[PUSHOVER FAILED] "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+
+    return False
+
+
+# ============================================================
+# STATE / THRESHOLD ENGINE
 # ============================================================
 
 def update_state(metric, symbol, long_value, short_value):
-
     threshold = (
         VALUE_THRESHOLD
         if metric == "VALUE"
         else TRADES_THRESHOLD
     )
 
-    gap, side = get_gap(long_value, short_value)
+    gap, side = get_gap(
+        long_value,
+        short_value,
+    )
 
     old = states[metric].get(
         symbol,
@@ -147,18 +203,16 @@ def update_state(metric, symbol, long_value, short_value):
     )
 
     # --------------------------------------------------------
-    # CONDITION NO LONGER ACTIVE
+    # BELOW THRESHOLD -> CLEAR
     # --------------------------------------------------------
 
     if not qualifies:
-
         if old["active"]:
-
             print(
                 f"[CLEAR] {metric} | "
                 f"{symbol} | "
                 f"previous={old['side']} | "
-                f"time={now_ist()}",
+                f"{now_ist()}",
                 flush=True,
             )
 
@@ -171,11 +225,10 @@ def update_state(metric, symbol, long_value, short_value):
         return
 
     # --------------------------------------------------------
-    # NEW CONDITION
+    # FIRST QUALIFYING OBSERVATION
     # --------------------------------------------------------
 
     if not old["active"]:
-
         first_time = now_ist()
 
         states[metric][symbol] = {
@@ -183,82 +236,128 @@ def update_state(metric, symbol, long_value, short_value):
             "side": side,
             "first_observed": first_time,
         }
+
+        if metric == "VALUE":
+            title = (
+                f"COINGLASS {symbol} VALUE "
+                f"{side} ${gap / 1_000_000:.2f}M GAP"
+            )
+
+            message = (
+                "COINGLASS 1H LIQUIDATION VALUE\n\n"
+                f"COIN: {symbol}\n"
+                f"LONG: {fmt_money(long_value)}\n"
+                f"SHORT: {fmt_money(short_value)}\n"
+                f"GAP: {fmt_money(gap)}\n"
+                f"STRONGER: {side}\n"
+                f"FIRST OBSERVED: {first_time}"
+            )
+
+        else:
+            title = (
+                f"COINGLASS {symbol} TRADES "
+                f"{side} {fmt_count(gap)} GAP"
+            )
+
+            message = (
+                "COINGLASS 1H LIQUIDATION TRADES\n\n"
+                f"COIN: {symbol}\n"
+                f"LONG TRADES: {fmt_count(long_value)}\n"
+                f"SHORT TRADES: {fmt_count(short_value)}\n"
+                f"GAP: {fmt_count(gap)} TRADES\n"
+                f"STRONGER: {side}\n"
+                f"FIRST OBSERVED: {first_time}"
+            )
 
         print(
             "\n============================================================",
             flush=True,
         )
-
-        if metric == "VALUE":
-
-            print(
-                "[NEW VALUE THRESHOLD]\n"
-                f"COIN: {symbol}\n"
-                f"1H LONG: {fmt_money(long_value)}\n"
-                f"1H SHORT: {fmt_money(short_value)}\n"
-                f"GAP: {fmt_money(gap)}\n"
-                f"STRONGER: {side}\n"
-                f"FIRST OBSERVED: {first_time}",
-                flush=True,
-            )
-
-        else:
-
-            print(
-                "[NEW TRADES THRESHOLD]\n"
-                f"COIN: {symbol}\n"
-                f"1H LONG TRADES: {fmt_count(long_value)}\n"
-                f"1H SHORT TRADES: {fmt_count(short_value)}\n"
-                f"GAP: {fmt_count(gap)} TRADES\n"
-                f"STRONGER: {side}\n"
-                f"FIRST OBSERVED: {first_time}",
-                flush=True,
-            )
-
+        print(
+            f"[NEW {metric} THRESHOLD]\n{message}",
+            flush=True,
+        )
         print(
             "============================================================",
             flush=True,
         )
 
+        send_pushover(
+            title,
+            message,
+        )
+
         return
 
     # --------------------------------------------------------
-    # OPPOSITE SIDE WHILE STILL ABOVE THRESHOLD
+    # SAME CONDITION -> NO DUPLICATE
     # --------------------------------------------------------
 
-    if old["side"] != side:
+    if old["side"] == side:
+        return
 
-        first_time = now_ist()
+    # --------------------------------------------------------
+    # OPPOSITE QUALIFYING SIDE
+    # --------------------------------------------------------
 
-        states[metric][symbol] = {
-            "active": True,
-            "side": side,
-            "first_observed": first_time,
-        }
+    old_side = old["side"]
+    first_time = now_ist()
 
-        print(
-            "\n============================================================\n"
-            f"[SIDE CHANGE] {metric}\n"
+    states[metric][symbol] = {
+        "active": True,
+        "side": side,
+        "first_observed": first_time,
+    }
+
+    if metric == "VALUE":
+        title = (
+            f"COINGLASS {symbol} VALUE "
+            f"{old_side}->{side}"
+        )
+
+        message = (
+            "COINGLASS 1H LIQUIDATION VALUE\n\n"
             f"COIN: {symbol}\n"
-            f"OLD SIDE: {old['side']}\n"
-            f"NEW SIDE: {side}\n"
-            f"FIRST OBSERVED: {first_time}\n"
-            "============================================================",
-            flush=True,
+            f"LONG: {fmt_money(long_value)}\n"
+            f"SHORT: {fmt_money(short_value)}\n"
+            f"GAP: {fmt_money(gap)}\n"
+            f"STATE: {old_side} -> {side}\n"
+            f"FIRST OBSERVED: {first_time}"
         )
 
-        return
+    else:
+        title = (
+            f"COINGLASS {symbol} TRADES "
+            f"{old_side}->{side}"
+        )
 
-    # Same active condition = no duplicate alert
-    states[metric][symbol] = old
+        message = (
+            "COINGLASS 1H LIQUIDATION TRADES\n\n"
+            f"COIN: {symbol}\n"
+            f"LONG TRADES: {fmt_count(long_value)}\n"
+            f"SHORT TRADES: {fmt_count(short_value)}\n"
+            f"GAP: {fmt_count(gap)} TRADES\n"
+            f"STATE: {old_side} -> {side}\n"
+            f"FIRST OBSERVED: {first_time}"
+        )
+
+    print(
+        f"[SIDE CHANGE] {metric} | "
+        f"{symbol} | {old_side}->{side}",
+        flush=True,
+    )
+
+    send_pushover(
+        title,
+        message,
+    )
 
 
 # ============================================================
-# PAGE TEXT
+# PAGE HELPERS
 # ============================================================
 
 async def get_rendered_lines(page):
-
     body_text = await page.locator("body").inner_text(
         timeout=15000
     )
@@ -266,7 +365,6 @@ async def get_rendered_lines(page):
     lines = []
 
     for line in body_text.splitlines():
-
         line = clean_text(line)
 
         if line:
@@ -281,7 +379,6 @@ async def get_rendered_lines(page):
 
 
 async def wait_for_liquidation_section(page):
-
     await page.get_by_text(
         "Total Liquidations",
         exact=False,
@@ -297,15 +394,11 @@ async def wait_for_liquidation_section(page):
 
 
 # ============================================================
-# DETECTION HELPERS
+# PARSER HELPERS
 # ============================================================
 
 def is_number_like(text):
-
     s = clean_text(text)
-
-    if not s:
-        return False
 
     return bool(
         re.fullmatch(
@@ -321,7 +414,6 @@ def is_number_like(text):
 
 
 def is_integer_like(text):
-
     s = clean_text(text).replace(",", "")
 
     return bool(
@@ -330,31 +422,24 @@ def is_integer_like(text):
 
 
 def is_price_like(text):
-
-    s = clean_text(text)
-
     return bool(
         re.fullmatch(
             r"\$\d[\d,]*(?:\.\d+)?",
-            s,
+            clean_text(text),
         )
     )
 
 
 def is_percent_like(text):
-
-    s = clean_text(text)
-
     return bool(
         re.fullmatch(
             r"[+\-−]?\d+(?:\.\d+)?%",
-            s,
+            clean_text(text),
         )
     )
 
 
 def is_symbol_like(text):
-
     s = clean_text(text).upper()
 
     if not re.fullmatch(
@@ -385,13 +470,11 @@ def is_symbol_like(text):
 
 
 # ============================================================
-# VALUE HEADER
+# VALUE PARSER
 # ============================================================
 
 def find_value_header(lines):
-
     for i in range(len(lines)):
-
         block = " ".join(
             lines[i:i + 20]
         ).lower()
@@ -403,12 +486,6 @@ def find_value_header(lines):
             and "4h long" in block
             and "4h short" in block
         ):
-
-            print(
-                f"[DEBUG] VALUE header starts around line={i}",
-                flush=True,
-            )
-
             return i
 
     raise RuntimeError(
@@ -416,12 +493,7 @@ def find_value_header(lines):
     )
 
 
-# ============================================================
-# VALUE PARSER
-# ============================================================
-
 def parse_value_rows(lines):
-
     header_index = find_value_header(lines)
 
     search_lines = lines[
@@ -458,7 +530,6 @@ def parse_value_rows(lines):
     i = 0
 
     while i < len(filtered):
-
         current = filtered[i]
 
         symbol = None
@@ -469,19 +540,14 @@ def parse_value_rows(lines):
             and i + 1 < len(filtered)
             and is_symbol_like(filtered[i + 1])
         ):
-
             symbol = filtered[i + 1].upper()
             symbol_index = i + 1
 
         elif is_symbol_like(current):
-
             symbol = current.upper()
             symbol_index = i
 
-        if (
-            symbol is None
-            or symbol in seen
-        ):
+        if symbol is None or symbol in seen:
             i += 1
             continue
 
@@ -491,7 +557,6 @@ def parse_value_rows(lines):
             symbol_index + 1,
             min(symbol_index + 20, len(filtered)),
         ):
-
             candidate = filtered[j]
 
             if (
@@ -505,15 +570,7 @@ def parse_value_rows(lines):
             if is_number_like(candidate):
                 numbers.append(candidate)
 
-        # Expected:
-        # price
-        # 24h %
-        # 1H long
-        # 1H short
-        # ...
-
         if len(numbers) >= 4:
-
             long_raw = numbers[2]
             short_raw = numbers[3]
 
@@ -526,7 +583,6 @@ def parse_value_rows(lines):
                     flags=re.I,
                 )
             ):
-
                 i += 1
                 continue
 
@@ -537,8 +593,6 @@ def parse_value_rows(lines):
                     "symbol": symbol,
                     "long": parse_number(long_raw),
                     "short": parse_number(short_raw),
-                    "long_raw": long_raw,
-                    "short_raw": short_raw,
                 }
             )
 
@@ -569,11 +623,10 @@ def parse_value_rows(lines):
 
 
 # ============================================================
-# SWITCH VALUE -> TRADES
+# DROPDOWN
 # ============================================================
 
 async def select_liquidation_trades(page):
-
     print(
         "[DROPDOWN] Switching VALUE -> TRADES",
         flush=True,
@@ -586,35 +639,19 @@ async def select_liquidation_trades(page):
 
     count = await controls.count()
 
-    print(
-        f"[DEBUG] Liquidation Value controls={count}",
-        flush=True,
-    )
-
     visible_control = None
 
     for i in range(count):
-
         candidate = controls.nth(i)
 
         try:
-
             if await candidate.is_visible():
-
                 visible_control = candidate
-
-                print(
-                    f"[DEBUG] Visible VALUE control index={i}",
-                    flush=True,
-                )
-
                 break
-
         except Exception:
             pass
 
     if visible_control is None:
-
         raise RuntimeError(
             "No visible Liquidation Value control found"
         )
@@ -632,35 +669,19 @@ async def select_liquidation_trades(page):
 
     option_count = await options.count()
 
-    print(
-        f"[DEBUG] Liquidation Trades options={option_count}",
-        flush=True,
-    )
-
     visible_option = None
 
     for i in range(option_count):
-
         candidate = options.nth(i)
 
         try:
-
             if await candidate.is_visible():
-
                 visible_option = candidate
-
-                print(
-                    f"[DEBUG] Visible TRADES option index={i}",
-                    flush=True,
-                )
-
                 break
-
         except Exception:
             pass
 
     if visible_option is None:
-
         raise RuntimeError(
             "No visible Liquidation Trades option found"
         )
@@ -669,7 +690,6 @@ async def select_liquidation_trades(page):
         timeout=10000
     )
 
-    # Give React/table enough time to replace VALUE data.
     await page.wait_for_timeout(4000)
 
     print(
@@ -680,53 +700,18 @@ async def select_liquidation_trades(page):
 
 # ============================================================
 # TRADES PARSER
-#
-# Captured rendered structure:
-#
-# SYMBOL
-# PRICE
-# 24H %
-# 1H LONG
-# 1H SHORT
-# 4H LONG
-# 4H SHORT
-# 12H LONG
-# 12H SHORT
-# 24H LONG
-# 24H SHORT
-# RANK
-#
-# Example captured:
-#
-# SPCX
-# $153.58
-# +0.60%
-# 0
-# 1
-# 0
-# 1
-# 0
-# 5
-# 2
-# 15
-# 21
-#
 # ============================================================
 
 def parse_trades_rows(lines):
-
     results = []
     seen = set()
 
     for i in range(len(lines)):
-
         symbol = lines[i].upper()
 
         if not is_symbol_like(symbol):
             continue
 
-        # Need at least:
-        # symbol + price + percent + 8 trade fields
         if i + 10 >= len(lines):
             continue
 
@@ -756,17 +741,6 @@ def parse_trades_rows(lines):
         if symbol in seen:
             continue
 
-        # Captured table order:
-        #
-        # 0 = 1H LONG
-        # 1 = 1H SHORT
-        # 2 = 4H LONG
-        # 3 = 4H SHORT
-        # 4 = 12H LONG
-        # 5 = 12H SHORT
-        # 6 = 24H LONG
-        # 7 = 24H SHORT
-
         long_1h = parse_number(
             trade_fields[0]
         )
@@ -782,8 +756,6 @@ def parse_trades_rows(lines):
                 "symbol": symbol,
                 "long": long_1h,
                 "short": short_1h,
-                "price": price,
-                "percent": percent,
             }
         )
 
@@ -799,7 +771,6 @@ def parse_trades_rows(lines):
             break
 
     if not results:
-
         raise RuntimeError(
             "No TRADES rows parsed"
         )
@@ -813,20 +784,17 @@ def parse_trades_rows(lines):
 
 
 # ============================================================
-# OUTPUT
+# SCAN OUTPUT
 # ============================================================
 
-def print_value_scan(rows):
-
+def process_value_rows(rows):
     print(
         f"\n[VALUE SCAN] "
-        f"{now_ist()} | "
-        f"rows={len(rows)}",
+        f"{now_ist()} | rows={len(rows)}",
         flush=True,
     )
 
     for row in rows:
-
         gap, side = get_gap(
             row["long"],
             row["short"],
@@ -849,17 +817,14 @@ def print_value_scan(rows):
         )
 
 
-def print_trades_scan(rows):
-
+def process_trades_rows(rows):
     print(
         f"\n[TRADES SCAN] "
-        f"{now_ist()} | "
-        f"rows={len(rows)}",
+        f"{now_ist()} | rows={len(rows)}",
         flush=True,
     )
 
     for row in rows:
-
         gap, side = get_gap(
             row["long"],
             row["short"],
@@ -887,18 +852,14 @@ def print_trades_scan(rows):
 # ============================================================
 
 async def scan_once(page):
-
     print(
-        "\n"
-        "############################################################\n"
+        "\n############################################################\n"
         f"[SCAN START] {now_ist()}\n"
         "############################################################",
         flush=True,
     )
 
-    # Fresh navigation every cycle.
-    # CoinGlass should return to VALUE view.
-
+    # Fresh page navigation every 5-minute cycle.
     response = await page.goto(
         URL,
         wait_until="domcontentloaded",
@@ -925,7 +886,6 @@ async def scan_once(page):
         response is not None
         and response.status >= 400
     ):
-
         raise RuntimeError(
             f"CoinGlass HTTP {response.status}"
         )
@@ -941,10 +901,7 @@ async def scan_once(page):
         page
     )
 
-    # ========================================================
     # VALUE
-    # ========================================================
-
     value_lines = await get_rendered_lines(
         page
     )
@@ -953,21 +910,14 @@ async def scan_once(page):
         value_lines
     )
 
-    print_value_scan(
+    process_value_rows(
         value_rows
     )
 
-    # ========================================================
-    # SWITCH TO TRADES
-    # ========================================================
-
+    # TRADES
     await select_liquidation_trades(
         page
     )
-
-    # ========================================================
-    # TRADES
-    # ========================================================
 
     trades_lines = await get_rendered_lines(
         page
@@ -977,13 +927,9 @@ async def scan_once(page):
         trades_lines
     )
 
-    print_trades_scan(
+    process_trades_rows(
         trades_rows
     )
-
-    # ========================================================
-    # SUCCESS
-    # ========================================================
 
     print(
         "\n############################################################",
@@ -1004,11 +950,10 @@ async def scan_once(page):
 
 
 # ============================================================
-# MAIN LOOP
+# MAIN
 # ============================================================
 
 async def main():
-
     print(
         "COINGLASS LIQUIDATION OBSERVER STARTING",
         flush=True,
@@ -1036,8 +981,13 @@ async def main():
         flush=True,
     )
 
-    async with async_playwright() as p:
+    print(
+        f"PUSHOVER: "
+        f"{'READY' if pushover_ready() else 'NOT CONFIGURED'}",
+        flush=True,
+    )
 
+    async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
             args=[
@@ -1058,15 +1008,12 @@ async def main():
         page = await context.new_page()
 
         while True:
-
             cycle_started = datetime.now(IST)
 
             try:
-
                 await scan_once(page)
 
             except Exception as exc:
-
                 print(
                     f"\n[SCAN FAILED] "
                     f"{now_ist()} | "
