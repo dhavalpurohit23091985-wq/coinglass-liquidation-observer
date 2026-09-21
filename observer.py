@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -25,6 +26,7 @@ IST = ZoneInfo("Asia/Kolkata")
 
 PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY", "").strip()
 PUSHOVER_APP_TOKEN = os.getenv("PUSHOVER_APP_TOKEN", "").strip()
+STATE_FILE = os.getenv("COINGLASS_STATE_FILE", "/tmp/coinglass_observer_state.json").strip()
 
 
 # ============================================================
@@ -37,10 +39,45 @@ states = {
 }
 
 # IMPORTANT:
-# The first successful scan after a worker start/redeploy is used only to
-# bootstrap the current CoinGlass state. This prevents duplicate Pushover
-# alerts when Render restarts the process and the in-memory state is lost.
+# Persist state locally so a normal worker restart can restore the previous
+# VALUE/TRADES side instead of treating the current side as a fresh bootstrap.
+# On a brand-new instance with no saved file, the original safe bootstrap remains.
 bootstrap_complete = False
+
+def save_states():
+    payload = {"states": states, "bootstrap_complete": bool(bootstrap_complete)}
+    tmp_path = f"{STATE_FILE}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, STATE_FILE)
+    except Exception as exc:
+        print(f"[STATE SAVE FAILED] {type(exc).__name__}: {exc}", flush=True)
+
+def load_states():
+    global states, bootstrap_complete
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        loaded = payload.get("states")
+        if not isinstance(loaded, dict):
+            raise ValueError("states missing")
+        for metric in ("VALUE", "TRADES"):
+            bucket = loaded.get(metric, {})
+            states[metric] = bucket if isinstance(bucket, dict) else {}
+        bootstrap_complete = bool(payload.get("bootstrap_complete", True))
+        print(
+            f"[STATE RESTORED] VALUE={len(states['VALUE'])} | "
+            f"TRADES={len(states['TRADES'])} | bootstrap_complete={bootstrap_complete}",
+            flush=True,
+        )
+        return True
+    except FileNotFoundError:
+        print("[STATE RESTORE] No saved state found; first scan will bootstrap.", flush=True)
+    except Exception as exc:
+        print(f"[STATE RESTORE FAILED] {type(exc).__name__}: {exc}", flush=True)
+    bootstrap_complete = False
+    return False
 
 
 # ============================================================
@@ -263,6 +300,7 @@ def update_state(metric, symbol, long_value, short_value, allow_alert=True):
             "side": None,
             "first_observed": None,
         }
+        save_states()
 
         return
 
@@ -278,6 +316,7 @@ def update_state(metric, symbol, long_value, short_value, allow_alert=True):
             "side": side,
             "first_observed": first_time,
         }
+        save_states()
 
         # On the first successful scan after process start/redeploy, seed the
         # already-active condition without sending a duplicate notification.
@@ -373,6 +412,7 @@ def update_state(metric, symbol, long_value, short_value, allow_alert=True):
         "side": side,
         "first_observed": first_time,
     }
+    save_states()
 
     if metric == "VALUE":
         title = (
@@ -1061,6 +1101,7 @@ async def scan_once(page):
 
     if not bootstrap_complete:
         bootstrap_complete = True
+        save_states()
         print(
             "[BOOTSTRAP COMPLETE] Current VALUE/TRADES states seeded; "
             "future fresh crosses/side changes can alert.",
@@ -1094,6 +1135,8 @@ async def main():
         "COINGLASS LIQUIDATION OBSERVER STARTING",
         flush=True,
     )
+
+    load_states()
 
     print(
         f"URL: {URL}",
