@@ -335,10 +335,19 @@ def update_state(metric, symbol, long_value, short_value, allow_alert=True):
             flush=True,
         )
 
-        send_pushover(
-            title,
-            message,
-        )
+        # VALUE alerts stay ON. TRADES are still scanned/state-tracked,
+        # but their Pushover notifications are intentionally OFF.
+        if metric == "VALUE":
+            send_pushover(
+                title,
+                message,
+            )
+        else:
+            print(
+                f"[TRADES PUSHOVER OFF] {symbol} | "
+                f"side={side} | gap={gap}",
+                flush=True,
+            )
 
         return
 
@@ -403,10 +412,19 @@ def update_state(metric, symbol, long_value, short_value, allow_alert=True):
         flush=True,
     )
 
-    send_pushover(
-        title,
-        message,
-    )
+    # VALUE side-change alerts stay ON. TRADES side changes are still
+    # calculated/state-tracked, but their Pushover notifications are OFF.
+    if metric == "VALUE":
+        send_pushover(
+            title,
+            message,
+        )
+    else:
+        print(
+            f"[TRADES PUSHOVER OFF] {symbol} | "
+            f"{old_side}->{side} | gap={gap}",
+            flush=True,
+        )
 
 
 # ============================================================
