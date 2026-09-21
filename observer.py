@@ -219,7 +219,7 @@ def update_state(metric, symbol, long_value, short_value, allow_alert=True):
     if metric == "VALUE":
         threshold = (
             XAU_VALUE_THRESHOLD
-            if symbol.upper() == "XAU"
+            if symbol.upper() in ("XAU", "XAUT")
             else VALUE_THRESHOLD
         )
     else:
@@ -660,9 +660,6 @@ def parse_value_rows(lines):
                 flush=True,
             )
 
-        if len(results) >= TOP_N:
-            break
-
         i += 1
 
     if not results:
@@ -670,8 +667,16 @@ def parse_value_rows(lines):
             "No VALUE rows parsed"
         )
 
+    normal_top = results[:TOP_N]
+    extra_gold = [
+        row for row in results[TOP_N:]
+        if row.get("symbol") in ("XAU", "XAUT")
+    ]
+    results = normal_top + extra_gold
+
     print(
-        f"[DEBUG] VALUE parsed rows={len(results)}",
+        f"[DEBUG] VALUE parsed rows={len(results)} "
+        f"(top={len(normal_top)} + extra_gold={len(extra_gold)})",
         flush=True,
     )
 
@@ -823,16 +828,21 @@ def parse_trades_rows(lines):
             flush=True,
         )
 
-        if len(results) >= TOP_N:
-            break
-
     if not results:
         raise RuntimeError(
             "No TRADES rows parsed"
         )
 
+    normal_top = results[:TOP_N]
+    extra_gold = [
+        row for row in results[TOP_N:]
+        if row.get("symbol") in ("XAU", "XAUT")
+    ]
+    results = normal_top + extra_gold
+
     print(
-        f"[DEBUG] TRADES parsed rows={len(results)}",
+        f"[DEBUG] TRADES parsed rows={len(results)} "
+        f"(top={len(normal_top)} + extra_gold={len(extra_gold)})",
         flush=True,
     )
 
@@ -843,7 +853,43 @@ def parse_trades_rows(lines):
 # SCAN OUTPUT
 # ============================================================
 
+def merge_gold_family_rows(rows):
+    """Combine CoinGlass XAU + XAUT into one canonical XAU bucket."""
+    merged = []
+    gold_long = 0.0
+    gold_short = 0.0
+    gold_seen = False
+
+    for row in rows:
+        symbol = str(row.get("symbol", "")).upper().strip()
+
+        if symbol in ("XAU", "XAUT"):
+            gold_seen = True
+            gold_long += float(row.get("long", 0.0) or 0.0)
+            gold_short += float(row.get("short", 0.0) or 0.0)
+        else:
+            merged.append(row)
+
+    if gold_seen:
+        merged.append(
+            {
+                "symbol": "XAU",
+                "long": gold_long,
+                "short": gold_short,
+            }
+        )
+        print(
+            f"[GOLD MERGE] XAU+XAUT -> XAU | "
+            f"L={gold_long} | S={gold_short}",
+            flush=True,
+        )
+
+    return merged
+
+
 def process_value_rows(rows, allow_alert=True):
+    rows = merge_gold_family_rows(rows)
+
     print(
         f"\n[VALUE SCAN] "
         f"{now_ist()} | rows={len(rows)}",
@@ -875,6 +921,8 @@ def process_value_rows(rows, allow_alert=True):
 
 
 def process_trades_rows(rows, allow_alert=True):
+    rows = merge_gold_family_rows(rows)
+
     print(
         f"\n[TRADES SCAN] "
         f"{now_ist()} | rows={len(rows)}",
