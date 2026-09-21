@@ -35,6 +35,12 @@ states = {
     "TRADES": {},
 }
 
+# IMPORTANT:
+# The first successful scan after a worker start/redeploy is used only to
+# bootstrap the current CoinGlass state. This prevents duplicate Pushover
+# alerts when Render restarts the process and the in-memory state is lost.
+bootstrap_complete = False
+
 
 # ============================================================
 # BASIC HELPERS
@@ -176,7 +182,7 @@ def send_pushover(title, message):
 # STATE / THRESHOLD ENGINE
 # ============================================================
 
-def update_state(metric, symbol, long_value, short_value):
+def update_state(metric, symbol, long_value, short_value, allow_alert=True):
     threshold = (
         VALUE_THRESHOLD
         if metric == "VALUE"
@@ -236,6 +242,17 @@ def update_state(metric, symbol, long_value, short_value):
             "side": side,
             "first_observed": first_time,
         }
+
+        # On the first successful scan after process start/redeploy, seed the
+        # already-active condition without sending a duplicate notification.
+        if not allow_alert:
+            print(
+                f"[BOOTSTRAP ACTIVE] {metric} | "
+                f"{symbol} | side={side} | "
+                f"gap={gap}",
+                flush=True,
+            )
+            return
 
         if metric == "VALUE":
             title = (
@@ -787,7 +804,7 @@ def parse_trades_rows(lines):
 # SCAN OUTPUT
 # ============================================================
 
-def process_value_rows(rows):
+def process_value_rows(rows, allow_alert=True):
     print(
         f"\n[VALUE SCAN] "
         f"{now_ist()} | rows={len(rows)}",
@@ -814,10 +831,11 @@ def process_value_rows(rows):
             row["symbol"],
             row["long"],
             row["short"],
+            allow_alert=allow_alert,
         )
 
 
-def process_trades_rows(rows):
+def process_trades_rows(rows, allow_alert=True):
     print(
         f"\n[TRADES SCAN] "
         f"{now_ist()} | rows={len(rows)}",
@@ -844,6 +862,7 @@ def process_trades_rows(rows):
             row["symbol"],
             row["long"],
             row["short"],
+            allow_alert=allow_alert,
         )
 
 
@@ -852,6 +871,8 @@ def process_trades_rows(rows):
 # ============================================================
 
 async def scan_once(page):
+    global bootstrap_complete
+
     print(
         "\n############################################################\n"
         f"[SCAN START] {now_ist()}\n"
@@ -911,7 +932,8 @@ async def scan_once(page):
     )
 
     process_value_rows(
-        value_rows
+        value_rows,
+        allow_alert=bootstrap_complete,
     )
 
     # TRADES
@@ -928,8 +950,17 @@ async def scan_once(page):
     )
 
     process_trades_rows(
-        trades_rows
+        trades_rows,
+        allow_alert=bootstrap_complete,
     )
+
+    if not bootstrap_complete:
+        bootstrap_complete = True
+        print(
+            "[BOOTSTRAP COMPLETE] Current VALUE/TRADES states seeded; "
+            "future fresh crosses/side changes can alert.",
+            flush=True,
+        )
 
     print(
         "\n############################################################",
