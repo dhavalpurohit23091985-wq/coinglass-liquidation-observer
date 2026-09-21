@@ -18,6 +18,7 @@ SCAN_SECONDS = 300
 TOP_N = 12
 
 VALUE_THRESHOLD = 5_000_000.0
+XAU_VALUE_THRESHOLD = 100_000.0
 TRADES_THRESHOLD = 500
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -183,11 +184,14 @@ def send_pushover(title, message):
 # ============================================================
 
 def update_state(metric, symbol, long_value, short_value, allow_alert=True):
-    threshold = (
-        VALUE_THRESHOLD
-        if metric == "VALUE"
-        else TRADES_THRESHOLD
-    )
+    if metric == "VALUE":
+        threshold = (
+            XAU_VALUE_THRESHOLD
+            if symbol.upper() == "XAU"
+            else VALUE_THRESHOLD
+        )
+    else:
+        threshold = TRADES_THRESHOLD
 
     gap, side = get_gap(
         long_value,
