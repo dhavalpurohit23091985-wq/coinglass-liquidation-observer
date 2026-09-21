@@ -47,8 +47,40 @@ bootstrap_complete = False
 # BASIC HELPERS
 # ============================================================
 
+def now_ist_dt():
+    return datetime.now(IST)
+
+
 def now_ist():
-    return datetime.now(IST).strftime("%d-%m-%Y %H:%M:%S IST")
+    return now_ist_dt().strftime("%d-%m-%Y %H:%M:%S IST")
+
+
+def format_duration(start_time):
+    if not start_time:
+        return "0S"
+
+    try:
+        start_dt = datetime.strptime(
+            start_time,
+            "%d-%m-%Y %H:%M:%S IST"
+        ).replace(tzinfo=IST)
+
+        total_seconds = max(
+            0,
+            int((now_ist_dt() - start_dt).total_seconds())
+        )
+
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+
+        if hours > 0:
+            return f"{hours}H {minutes}M {seconds}S"
+        if minutes > 0:
+            return f"{minutes}M {seconds}S"
+        return f"{seconds}S"
+
+    except Exception:
+        return "0S"
 
 
 def clean_text(value):
@@ -271,7 +303,7 @@ def update_state(metric, symbol, long_value, short_value, allow_alert=True):
                 f"SHORT: {fmt_money(short_value)}\n"
                 f"GAP: {fmt_money(gap)}\n"
                 f"STRONGER: {side}\n"
-                f"FIRST OBSERVED: {first_time}"
+                f"ACTIVE FOR: 0S"
             )
 
         else:
@@ -287,7 +319,7 @@ def update_state(metric, symbol, long_value, short_value, allow_alert=True):
                 f"SHORT TRADES: {fmt_count(short_value)}\n"
                 f"GAP: {fmt_count(gap)} TRADES\n"
                 f"STRONGER: {side}\n"
-                f"FIRST OBSERVED: {first_time}"
+                f"ACTIVE FOR: 0S"
             )
 
         print(
@@ -322,6 +354,9 @@ def update_state(metric, symbol, long_value, short_value, allow_alert=True):
     # --------------------------------------------------------
 
     old_side = old["side"]
+    previous_active_for = format_duration(
+        old["first_observed"]
+    )
     first_time = now_ist()
 
     states[metric][symbol] = {
@@ -343,7 +378,7 @@ def update_state(metric, symbol, long_value, short_value, allow_alert=True):
             f"SHORT: {fmt_money(short_value)}\n"
             f"GAP: {fmt_money(gap)}\n"
             f"STATE: {old_side} -> {side}\n"
-            f"FIRST OBSERVED: {first_time}"
+            f"PREVIOUS {old_side} ACTIVE FOR: {previous_active_for}"
         )
 
     else:
@@ -359,7 +394,7 @@ def update_state(metric, symbol, long_value, short_value, allow_alert=True):
             f"SHORT TRADES: {fmt_count(short_value)}\n"
             f"GAP: {fmt_count(gap)} TRADES\n"
             f"STATE: {old_side} -> {side}\n"
-            f"FIRST OBSERVED: {first_time}"
+            f"PREVIOUS {old_side} ACTIVE FOR: {previous_active_for}"
         )
 
     print(
