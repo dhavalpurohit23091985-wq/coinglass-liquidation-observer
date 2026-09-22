@@ -18,6 +18,10 @@ URL = "https://www.coinglass.com/liquidations"
 SCAN_SECONDS = 60
 TOP_N = 12
 
+# Only BTC and XAU can send VALUE Pushover notifications.
+# All Top-12 rows are still parsed/scanned/state-tracked.
+ALERT_SYMBOLS = {"BTC", "XAU"}
+
 VALUE_THRESHOLD = 5_000_000.0
 XAU_VALUE_THRESHOLD = 100_000.0
 TRADES_THRESHOLD = 500
@@ -448,10 +452,16 @@ def update_state(
 
         # VALUE alerts stay ON. TRADES are still scanned/state-tracked,
         # but their Pushover notifications are intentionally OFF.
-        if metric == "VALUE":
+        if metric == "VALUE" and symbol.upper() in ALERT_SYMBOLS:
             send_pushover(
                 title,
                 message,
+            )
+        elif metric == "VALUE":
+            print(
+                f"[VALUE PUSHOVER OFF] {symbol} | "
+                f"side={side} | gap={gap}",
+                flush=True,
             )
         else:
             print(
@@ -527,10 +537,16 @@ def update_state(
 
     # VALUE side-change alerts stay ON. TRADES side changes are still
     # calculated/state-tracked, but their Pushover notifications are OFF.
-    if metric == "VALUE":
+    if metric == "VALUE" and symbol.upper() in ALERT_SYMBOLS:
         send_pushover(
             title,
             message,
+        )
+    elif metric == "VALUE":
+        print(
+            f"[VALUE PUSHOVER OFF] {symbol} | "
+            f"{old_side}->{side} | gap={gap}",
+            flush=True,
         )
     else:
         print(
