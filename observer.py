@@ -203,6 +203,22 @@ def get_value_percentages(long_value, short_value):
     return long_pct, short_pct, gap_pct
 
 
+def format_value_timeframe(label, long_value, short_value):
+    gap, side = get_gap(long_value, short_value)
+    long_pct, short_pct, gap_pct = get_value_percentages(
+        long_value,
+        short_value,
+    )
+
+    return (
+        f"{label}\n"
+        f"LONG: {fmt_money(long_value)} | {long_pct:.2f}%\n"
+        f"SHORT: {fmt_money(short_value)} | {short_pct:.2f}%\n"
+        f"GAP: {fmt_money(gap)} | {gap_pct:.2f}%\n"
+        f"STRONGER: {side}"
+    )
+
+
 def get_gap(long_value, short_value):
     signed_gap = long_value - short_value
     gap = abs(signed_gap)
@@ -275,7 +291,18 @@ def send_pushover(title, message):
 # STATE / THRESHOLD ENGINE
 # ============================================================
 
-def update_state(metric, symbol, long_value, short_value, price=0.0, allow_alert=True):
+def update_state(
+    metric,
+    symbol,
+    long_value,
+    short_value,
+    price=0.0,
+    long_4h=0.0,
+    short_4h=0.0,
+    long_12h=0.0,
+    short_12h=0.0,
+    allow_alert=True,
+):
     if metric == "VALUE":
         threshold = (
             XAU_VALUE_THRESHOLD
@@ -293,6 +320,22 @@ def update_state(metric, symbol, long_value, short_value, price=0.0, allow_alert
     long_pct, short_pct, gap_pct = get_value_percentages(
         long_value,
         short_value,
+    )
+
+    value_1h_text = format_value_timeframe(
+        "1H",
+        long_value,
+        short_value,
+    )
+    value_4h_text = format_value_timeframe(
+        "4H",
+        long_4h,
+        short_4h,
+    )
+    value_12h_text = format_value_timeframe(
+        "12H",
+        long_12h,
+        short_12h,
     )
 
     old = states[metric].get(
@@ -364,13 +407,13 @@ def update_state(metric, symbol, long_value, short_value, price=0.0, allow_alert
             )
 
             message = (
-                "COINGLASS 1H LIQUIDATION VALUE\n\n"
+                "COINGLASS LIQUIDATION VALUE\n\n"
                 f"COIN: {symbol}\n"
                 f"PRICE: {fmt_price(price)}\n\n"
-                f"LONG: {fmt_money(long_value)} | {long_pct:.2f}%\n"
-                f"SHORT: {fmt_money(short_value)} | {short_pct:.2f}%\n"
-                f"GAP: {fmt_money(gap)} | {gap_pct:.2f}%\n\n"
-                f"STRONGER: {side}\n"
+                f"{value_1h_text}\n\n"
+                f"{value_4h_text}\n\n"
+                f"{value_12h_text}\n\n"
+                f"1H TRIGGER: {side}\n"
                 f"ACTIVE FOR: 0S"
             )
 
@@ -450,13 +493,13 @@ def update_state(metric, symbol, long_value, short_value, price=0.0, allow_alert
         )
 
         message = (
-            "COINGLASS 1H LIQUIDATION VALUE\n\n"
+            "COINGLASS LIQUIDATION VALUE\n\n"
             f"COIN: {symbol}\n"
             f"PRICE: {fmt_price(price)}\n\n"
-            f"LONG: {fmt_money(long_value)} | {long_pct:.2f}%\n"
-            f"SHORT: {fmt_money(short_value)} | {short_pct:.2f}%\n"
-            f"GAP: {fmt_money(gap)} | {gap_pct:.2f}%\n\n"
-            f"STATE: {old_side} -> {side}\n"
+            f"{value_1h_text}\n\n"
+            f"{value_4h_text}\n\n"
+            f"{value_12h_text}\n\n"
+            f"1H STATE: {old_side} -> {side}\n"
             f"PREVIOUS {old_side} ACTIVE FOR: {previous_active_for}"
         )
 
@@ -714,9 +757,13 @@ def parse_value_rows(lines):
             if is_number_like(candidate):
                 numbers.append(candidate)
 
-        if len(numbers) >= 4:
+        if len(numbers) >= 8:
             long_raw = numbers[2]
             short_raw = numbers[3]
+            long_4h_raw = numbers[4]
+            short_4h_raw = numbers[5]
+            long_12h_raw = numbers[6]
+            short_12h_raw = numbers[7]
 
             if (
                 "$" not in long_raw
@@ -738,6 +785,10 @@ def parse_value_rows(lines):
                     "price": parse_number(numbers[0]),
                     "long": parse_number(long_raw),
                     "short": parse_number(short_raw),
+                    "long_4h": parse_number(long_4h_raw),
+                    "short_4h": parse_number(short_4h_raw),
+                    "long_12h": parse_number(long_12h_raw),
+                    "short_12h": parse_number(short_12h_raw),
                 }
             )
 
@@ -745,7 +796,11 @@ def parse_value_rows(lines):
                 f"[PARSED] VALUE | "
                 f"{symbol} | "
                 f"1H L={long_raw} | "
-                f"1H S={short_raw}",
+                f"1H S={short_raw} | "
+                f"4H L={long_4h_raw} | "
+                f"4H S={short_4h_raw} | "
+                f"12H L={long_12h_raw} | "
+                f"12H S={short_12h_raw}",
                 flush=True,
             )
 
@@ -947,6 +1002,10 @@ def merge_gold_family_rows(rows):
     merged = []
     gold_long = 0.0
     gold_short = 0.0
+    gold_long_4h = 0.0
+    gold_short_4h = 0.0
+    gold_long_12h = 0.0
+    gold_short_12h = 0.0
     gold_price = 0.0
     gold_seen = False
 
@@ -957,6 +1016,10 @@ def merge_gold_family_rows(rows):
             gold_seen = True
             gold_long += float(row.get("long", 0.0) or 0.0)
             gold_short += float(row.get("short", 0.0) or 0.0)
+            gold_long_4h += float(row.get("long_4h", 0.0) or 0.0)
+            gold_short_4h += float(row.get("short_4h", 0.0) or 0.0)
+            gold_long_12h += float(row.get("long_12h", 0.0) or 0.0)
+            gold_short_12h += float(row.get("short_12h", 0.0) or 0.0)
             row_price = float(row.get("price", 0.0) or 0.0)
             if symbol == "XAU" and row_price > 0:
                 gold_price = row_price
@@ -972,6 +1035,10 @@ def merge_gold_family_rows(rows):
                 "price": gold_price,
                 "long": gold_long,
                 "short": gold_short,
+                "long_4h": gold_long_4h,
+                "short_4h": gold_short_4h,
+                "long_12h": gold_long_12h,
+                "short_12h": gold_short_12h,
             }
         )
         print(
@@ -1013,6 +1080,10 @@ def process_value_rows(rows, allow_alert=True):
             row["long"],
             row["short"],
             price=row.get("price", 0.0),
+            long_4h=row.get("long_4h", 0.0),
+            short_4h=row.get("short_4h", 0.0),
+            long_12h=row.get("long_12h", 0.0),
+            short_12h=row.get("short_12h", 0.0),
             allow_alert=allow_alert,
         )
 
