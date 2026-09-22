@@ -180,6 +180,29 @@ def fmt_count(value):
     return f"{int(round(value)):,}"
 
 
+def fmt_price(value):
+    value = float(value or 0.0)
+    if value <= 0:
+        return "N/A"
+    if value >= 1000:
+        return f"${value:,.2f}"
+    if value >= 1:
+        return f"${value:,.4f}".rstrip("0").rstrip(".")
+    return f"${value:,.8f}".rstrip("0").rstrip(".")
+
+
+def get_value_percentages(long_value, short_value):
+    long_value = float(long_value or 0.0)
+    short_value = float(short_value or 0.0)
+    total = long_value + short_value
+    if total <= 0:
+        return 0.0, 0.0, 0.0
+    long_pct = (long_value / total) * 100.0
+    short_pct = (short_value / total) * 100.0
+    gap_pct = (abs(long_value - short_value) / total) * 100.0
+    return long_pct, short_pct, gap_pct
+
+
 def get_gap(long_value, short_value):
     signed_gap = long_value - short_value
     gap = abs(signed_gap)
@@ -252,7 +275,7 @@ def send_pushover(title, message):
 # STATE / THRESHOLD ENGINE
 # ============================================================
 
-def update_state(metric, symbol, long_value, short_value, allow_alert=True):
+def update_state(metric, symbol, long_value, short_value, price=0.0, allow_alert=True):
     if metric == "VALUE":
         threshold = (
             XAU_VALUE_THRESHOLD
@@ -263,6 +286,11 @@ def update_state(metric, symbol, long_value, short_value, allow_alert=True):
         threshold = TRADES_THRESHOLD
 
     gap, side = get_gap(
+        long_value,
+        short_value,
+    )
+
+    long_pct, short_pct, gap_pct = get_value_percentages(
         long_value,
         short_value,
     )
@@ -338,9 +366,10 @@ def update_state(metric, symbol, long_value, short_value, allow_alert=True):
             message = (
                 "COINGLASS 1H LIQUIDATION VALUE\n\n"
                 f"COIN: {symbol}\n"
-                f"LONG: {fmt_money(long_value)}\n"
-                f"SHORT: {fmt_money(short_value)}\n"
-                f"GAP: {fmt_money(gap)}\n"
+                f"PRICE: {fmt_price(price)}\n\n"
+                f"LONG: {fmt_money(long_value)} | {long_pct:.2f}%\n"
+                f"SHORT: {fmt_money(short_value)} | {short_pct:.2f}%\n"
+                f"GAP: {fmt_money(gap)} | {gap_pct:.2f}%\n\n"
                 f"STRONGER: {side}\n"
                 f"ACTIVE FOR: 0S"
             )
@@ -423,9 +452,10 @@ def update_state(metric, symbol, long_value, short_value, allow_alert=True):
         message = (
             "COINGLASS 1H LIQUIDATION VALUE\n\n"
             f"COIN: {symbol}\n"
-            f"LONG: {fmt_money(long_value)}\n"
-            f"SHORT: {fmt_money(short_value)}\n"
-            f"GAP: {fmt_money(gap)}\n"
+            f"PRICE: {fmt_price(price)}\n\n"
+            f"LONG: {fmt_money(long_value)} | {long_pct:.2f}%\n"
+            f"SHORT: {fmt_money(short_value)} | {short_pct:.2f}%\n"
+            f"GAP: {fmt_money(gap)} | {gap_pct:.2f}%\n\n"
             f"STATE: {old_side} -> {side}\n"
             f"PREVIOUS {old_side} ACTIVE FOR: {previous_active_for}"
         )
@@ -705,6 +735,7 @@ def parse_value_rows(lines):
             results.append(
                 {
                     "symbol": symbol,
+                    "price": parse_number(numbers[0]),
                     "long": parse_number(long_raw),
                     "short": parse_number(short_raw),
                 }
@@ -916,6 +947,7 @@ def merge_gold_family_rows(rows):
     merged = []
     gold_long = 0.0
     gold_short = 0.0
+    gold_price = 0.0
     gold_seen = False
 
     for row in rows:
@@ -925,6 +957,11 @@ def merge_gold_family_rows(rows):
             gold_seen = True
             gold_long += float(row.get("long", 0.0) or 0.0)
             gold_short += float(row.get("short", 0.0) or 0.0)
+            row_price = float(row.get("price", 0.0) or 0.0)
+            if symbol == "XAU" and row_price > 0:
+                gold_price = row_price
+            elif gold_price <= 0 and row_price > 0:
+                gold_price = row_price
         else:
             merged.append(row)
 
@@ -932,6 +969,7 @@ def merge_gold_family_rows(rows):
         merged.append(
             {
                 "symbol": "XAU",
+                "price": gold_price,
                 "long": gold_long,
                 "short": gold_short,
             }
@@ -974,6 +1012,7 @@ def process_value_rows(rows, allow_alert=True):
             row["symbol"],
             row["long"],
             row["short"],
+            price=row.get("price", 0.0),
             allow_alert=allow_alert,
         )
 
