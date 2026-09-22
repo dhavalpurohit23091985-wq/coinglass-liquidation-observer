@@ -15,7 +15,7 @@ from playwright.async_api import async_playwright
 
 URL = "https://www.coinglass.com/liquidations"
 
-SCAN_SECONDS = 300
+SCAN_SECONDS = 60
 TOP_N = 12
 
 VALUE_THRESHOLD = 5_000_000.0
@@ -1135,7 +1135,7 @@ async def scan_once(page):
         flush=True,
     )
 
-    # Fresh page navigation every 5-minute cycle.
+    # Fresh page navigation every 1-minute cycle.
     response = await page.goto(
         URL,
         wait_until="domcontentloaded",
