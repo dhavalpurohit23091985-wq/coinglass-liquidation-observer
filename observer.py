@@ -2,6 +2,8 @@ import asyncio
 import os
 import re
 import json
+import gc
+import resource
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -16,7 +18,7 @@ from playwright.async_api import async_playwright
 URL = "https://www.coinglass.com/liquidations"
 
 SCAN_SECONDS = 60
-BROWSER_RECYCLE_SCANS = 3  # fresh Chromium about every 10 scans (~10 min)
+BROWSER_RECYCLE_SCANS = 3  # fresh Chromium every 3 scans (~3 min)
 
 # Only these liquidation VALUE families are processed.
 # XAU + XAUT are merged into one canonical XAU bucket.
@@ -139,6 +141,26 @@ def load_states():
 
     bootstrap_complete = False
     return False
+
+
+# ============================================================
+# RAM DIAGNOSTICS
+# ============================================================
+
+def log_ram(stage):
+    # Python process peak RSS. Chromium uses child processes, so
+    # Render Metrics remains the source of truth for total RAM.
+    try:
+        peak_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+        print(
+            f"[RAM DIAG] {stage} | python_peak_rss={peak_mb:.1f} MB",
+            flush=True,
+        )
+    except Exception as exc:
+        print(
+            f"[RAM DIAG FAILED] {stage} | {type(exc).__name__}: {exc}",
+            flush=True,
+        )
 
 
 # ============================================================
@@ -1114,6 +1136,8 @@ async def scan_once(page):
         flush=True,
     )
 
+    log_ram("before page.goto")
+
     # Fresh navigation every 1-minute cycle.
     response = await page.goto(
         URL,
@@ -1147,6 +1171,7 @@ async def scan_once(page):
         )
 
     await page.wait_for_timeout(8000)
+    log_ram("after page load + 8s wait")
 
     print(
         f"[PAGE] title="
@@ -1162,6 +1187,7 @@ async def scan_once(page):
     value_lines = await get_rendered_lines(
         page
     )
+    log_ram("after body inner_text")
 
     value_rows = parse_value_rows(
         value_lines
@@ -1171,6 +1197,11 @@ async def scan_once(page):
         value_rows,
         allow_alert=bootstrap_complete,
     )
+
+    del value_lines
+    del value_rows
+    gc.collect()
+    log_ram("after parse/process + gc")
 
     if not bootstrap_complete:
         bootstrap_complete = True
@@ -1265,6 +1296,9 @@ async def main():
                         "--disable-default-apps",
                         "--disable-extensions",
                         "--disable-sync",
+                        "--disable-component-update",
+                        "--disable-domain-reliability",
+                        "--disable-features=Translate,BackForwardCache",
                     ],
                 )
                 context = await browser.new_context(
@@ -1274,14 +1308,40 @@ async def main():
                     service_workers="block",
                 )
 
+                # Keep scripts/XHR/fetch because CoinGlass may need them
+                # to populate the VALUE table. Block only heavy resources
+                # and common analytics/ad/tracking hosts.
+                blocked_host_fragments = (
+                    "google-analytics.com",
+                    "googletagmanager.com",
+                    "doubleclick.net",
+                    "googlesyndication.com",
+                    "googleadservices.com",
+                    "connect.facebook.net",
+                    "clarity.ms",
+                    "hotjar.com",
+                    "segment.io",
+                    "segment.com",
+                    "sentry.io",
+                )
+
                 async def block_heavy_resources(route):
-                    if route.request.resource_type in {"image", "media", "font"}:
+                    request = route.request
+                    url_lower = request.url.lower()
+
+                    if request.resource_type in {"image", "media", "font"}:
                         await route.abort()
-                    else:
-                        await route.continue_()
+                        return
+
+                    if any(host in url_lower for host in blocked_host_fragments):
+                        await route.abort()
+                        return
+
+                    await route.continue_()
 
                 await context.route("**/*", block_heavy_resources)
                 page = await context.new_page()
+                log_ram("fresh browser/context/page created")
                 print(
                     f"[BROWSER] fresh Chromium started | "
                     f"recycle_after={BROWSER_RECYCLE_SCANS} scans",
