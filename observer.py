@@ -1161,6 +1161,24 @@ async def scan_once(page):
         flush=True,
     )
 
+    # Diagnostic snapshot BEFORE raising on HTTP errors.
+    # This does not change scan/calculation logic; it only logs what CoinGlass returned.
+    try:
+        diag_title = await page.title()
+    except Exception as e:
+        diag_title = f"<title read failed: {type(e).__name__}: {e}>"
+
+    try:
+        diag_body = await page.locator("body").inner_text(timeout=5000)
+        diag_body = " ".join(diag_body.split())[:300]
+    except Exception as e:
+        diag_body = f"<body read failed: {type(e).__name__}: {e}>"
+
+    print(f"[HTTP DIAG] status={status}", flush=True)
+    print(f"[HTTP DIAG] final_url={page.url}", flush=True)
+    print(f"[HTTP DIAG] title={diag_title}", flush=True)
+    print(f"[HTTP DIAG] body300={diag_body}", flush=True)
+
     if (
         response is not None
         and response.status >= 400
