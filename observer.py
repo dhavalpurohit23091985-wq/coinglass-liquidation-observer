@@ -1198,8 +1198,9 @@ async def scan_once(page):
         allow_alert=bootstrap_complete,
     )
 
+    # Release the large rendered-text list now. Keep value_rows alive
+    # until the existing [SCAN OK] log has used len(value_rows).
     del value_lines
-    del value_rows
     gc.collect()
     log_ram("after parse/process + gc")
 
@@ -1232,6 +1233,10 @@ async def scan_once(page):
         "############################################################",
         flush=True,
     )
+
+    # Safe final per-scan cleanup: value_rows has already been used above.
+    del value_rows
+    gc.collect()
 
 
 # ============================================================
