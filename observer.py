@@ -17,7 +17,7 @@ URL = "https://www.coinglass.com/liquidations"
 
 SCAN_SECONDS = 60
 
-# Only these liquidation VALUE families are processed.
+# BTC only.
 TARGET_SYMBOLS = {"BTC"}
 
 VALUE_THRESHOLD = 1_000_000.0
@@ -272,89 +272,6 @@ def fmt_price(value):
     )
 
 
-def get_value_percentages(
-    long_value,
-    short_value,
-):
-    long_value = float(long_value or 0.0)
-    short_value = float(short_value or 0.0)
-
-    total = long_value + short_value
-
-    if total <= 0:
-        return 0.0, 0.0, 0.0
-
-    long_pct = (
-        long_value / total
-    ) * 100.0
-
-    short_pct = (
-        short_value / total
-    ) * 100.0
-
-    gap_pct = (
-        abs(long_value - short_value)
-        / total
-    ) * 100.0
-
-    return (
-        long_pct,
-        short_pct,
-        gap_pct,
-    )
-
-
-def get_gap(
-    long_value,
-    short_value,
-):
-    signed_gap = (
-        long_value - short_value
-    )
-
-    gap = abs(signed_gap)
-
-    if signed_gap > 0:
-        side = "LONG"
-
-    elif signed_gap < 0:
-        side = "SHORT"
-
-    else:
-        side = "EVEN"
-
-    return gap, side
-
-
-def format_value_timeframe(
-    label,
-    long_value,
-    short_value,
-):
-    gap, side = get_gap(
-        long_value,
-        short_value,
-    )
-
-    long_pct, short_pct, gap_pct = (
-        get_value_percentages(
-            long_value,
-            short_value,
-        )
-    )
-
-    return (
-        f"{label}\n"
-        f"LONG: {fmt_money(long_value)} | "
-        f"{long_pct:.2f}%\n"
-        f"SHORT: {fmt_money(short_value)} | "
-        f"{short_pct:.2f}%\n"
-        f"GAP: {fmt_money(gap)} | "
-        f"{gap_pct:.2f}%\n"
-        f"STRONGER: {side}"
-    )
-
-
 # ============================================================
 # PUSHOVER
 # ============================================================
@@ -605,7 +522,7 @@ def find_value_header(lines):
 
 
 # ============================================================
-# VALUE PARSER — BTC ONLY
+# BTC 4H PARSER
 # ============================================================
 
 def parse_value_rows(lines):
@@ -715,9 +632,6 @@ def parse_value_rows(lines):
             long_4h_raw = numbers[4]
             short_4h_raw = numbers[5]
 
-            long_12h_raw = numbers[6]
-            short_12h_raw = numbers[7]
-
             if (
                 "$" not in long_raw
                 and "$" not in short_raw
@@ -735,39 +649,16 @@ def parse_value_rows(lines):
             results.append(
                 {
                     "symbol": symbol,
-                    "price": parse_number(
-                        numbers[0]
-                    ),
-                    "long": parse_number(
-                        long_raw
-                    ),
-                    "short": parse_number(
-                        short_raw
-                    ),
-                    "long_4h": parse_number(
-                        long_4h_raw
-                    ),
-                    "short_4h": parse_number(
-                        short_4h_raw
-                    ),
-                    "long_12h": parse_number(
-                        long_12h_raw
-                    ),
-                    "short_12h": parse_number(
-                        short_12h_raw
-                    ),
+                    "price": parse_number(numbers[0]),
+                    "long_4h": parse_number(long_4h_raw),
+                    "short_4h": parse_number(short_4h_raw),
                 }
             )
 
             print(
-                f"[PARSED] VALUE | "
-                f"{symbol} | "
-                f"1H L={long_raw} | "
-                f"1H S={short_raw} | "
+                f"[PARSED] BTC | "
                 f"4H L={long_4h_raw} | "
-                f"4H S={short_4h_raw} | "
-                f"12H L={long_12h_raw} | "
-                f"12H S={short_12h_raw}",
+                f"4H S={short_4h_raw}",
                 flush=True,
             )
 
@@ -790,7 +681,7 @@ def parse_value_rows(lines):
 
 
 # ============================================================
-# VALUE PROCESSING
+# BTC 4H PROCESSING
 # ============================================================
 
 def process_value_rows(rows, allow_alert=True):
