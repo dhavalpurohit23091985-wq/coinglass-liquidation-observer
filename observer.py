@@ -16,6 +16,7 @@ from playwright.async_api import async_playwright
 URL = "https://www.coinglass.com/liquidations"
 
 SCAN_SECONDS = 60
+BROWSER_RECYCLE_SCANS = 10  # fresh Chromium about every 10 scans (~10 min)
 
 # Only these liquidation VALUE families are processed.
 # XAU + XAUT are merged into one canonical XAU bucket.
@@ -1251,59 +1252,89 @@ async def main():
     )
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
-        )
-
-        context = await browser.new_context(
-            viewport={
-                "width": 1600,
-                "height": 1200,
-            },
-            locale="en-US",
-            timezone_id="Asia/Kolkata",
-        )
-
-        page = await context.new_page()
-
         while True:
-            cycle_started = datetime.now(IST)
-
+            browser = None
+            context = None
             try:
-                await scan_once(page)
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-background-networking",
+                        "--disable-default-apps",
+                        "--disable-extensions",
+                        "--disable-sync",
+                    ],
+                )
+                context = await browser.new_context(
+                    viewport={"width": 1000, "height": 800},
+                    locale="en-US",
+                    timezone_id="Asia/Kolkata",
+                    service_workers="block",
+                )
 
-            except Exception as exc:
+                async def block_heavy_resources(route):
+                    if route.request.resource_type in {"image", "media", "font"}:
+                        await route.abort()
+                    else:
+                        await route.continue_()
+
+                await context.route("**/*", block_heavy_resources)
+                page = await context.new_page()
                 print(
-                    f"\n[SCAN FAILED] "
-                    f"{now_ist()} | "
-                    f"{type(exc).__name__}: "
-                    f"{exc}",
+                    f"[BROWSER] fresh Chromium started | "
+                    f"recycle_after={BROWSER_RECYCLE_SCANS} scans",
                     flush=True,
                 )
 
-            elapsed = (
-                datetime.now(IST)
-                - cycle_started
-            ).total_seconds()
+                for scan_number in range(1, BROWSER_RECYCLE_SCANS + 1):
+                    cycle_started = datetime.now(IST)
+                    try:
+                        await scan_once(page)
+                    except Exception as exc:
+                        print(
+                            f"\n[SCAN FAILED] {now_ist()} | "
+                            f"{type(exc).__name__}: {exc}",
+                            flush=True,
+                        )
 
-            sleep_for = max(
-                5,
-                SCAN_SECONDS - elapsed,
-            )
+                    elapsed = (datetime.now(IST) - cycle_started).total_seconds()
+                    sleep_for = max(5, SCAN_SECONDS - elapsed)
 
-            print(
-                f"[NEXT SCAN] approximately "
-                f"{int(sleep_for)} seconds",
-                flush=True,
-            )
+                    if scan_number < BROWSER_RECYCLE_SCANS:
+                        print(
+                            f"[NEXT SCAN] approximately {int(sleep_for)} seconds | "
+                            f"browser_scan={scan_number}/{BROWSER_RECYCLE_SCANS}",
+                            flush=True,
+                        )
+                        await asyncio.sleep(sleep_for)
+                    else:
+                        print(
+                            f"[BROWSER RECYCLE] {scan_number} scans complete; "
+                            f"closing Chromium cleanly",
+                            flush=True,
+                        )
+            except Exception as exc:
+                print(
+                    f"[BROWSER CYCLE FAILED] {now_ist()} | "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+            finally:
+                if context is not None:
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
+                if browser is not None:
+                    try:
+                        await browser.close()
+                    except Exception:
+                        pass
 
-            await asyncio.sleep(
-                sleep_for
-            )
+            await asyncio.sleep(2)
+
 
 
 if __name__ == "__main__":
