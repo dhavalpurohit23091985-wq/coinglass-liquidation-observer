@@ -16,7 +16,7 @@ from playwright.async_api import async_playwright
 URL = "https://www.coinglass.com/liquidations"
 
 SCAN_SECONDS = 60
-BROWSER_RECYCLE_SCANS = 10  # fresh Chromium about every 10 scans (~10 min)
+BROWSER_RECYCLE_SCANS = 3  # fresh Chromium about every 10 scans (~10 min)
 
 # Only these liquidation VALUE families are processed.
 # XAU + XAUT are merged into one canonical XAU bucket.
