@@ -18,11 +18,9 @@ URL = "https://www.coinglass.com/liquidations"
 SCAN_SECONDS = 60
 
 # Only these liquidation VALUE families are processed.
-# XAU + XAUT are merged into one canonical XAU bucket.
-TARGET_SYMBOLS = {"BTC", "XAU", "XAUT"}
+TARGET_SYMBOLS = {"BTC"}
 
-VALUE_THRESHOLD = 5_000_000.0
-XAU_VALUE_THRESHOLD = 100_000.0
+VALUE_THRESHOLD = 1_000_000.0
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -38,7 +36,7 @@ STATE_FILE = os.getenv(
 # STATE
 # ============================================================
 
-# VALUE only.
+# BTC 4H signal state only.
 states = {
     "VALUE": {},
 }
@@ -93,7 +91,7 @@ def load_states():
         if not isinstance(bucket, dict):
             bucket = {}
 
-        # Keep only BTC/XAU family state.
+        # Keep only BTC state.
         cleaned = {}
 
         for symbol, state in bucket.items():
@@ -101,11 +99,6 @@ def load_states():
 
             if symbol_upper == "BTC":
                 cleaned["BTC"] = state
-
-            elif symbol_upper in ("XAU", "XAUT"):
-                # Canonical gold state is XAU.
-                if "XAU" not in cleaned:
-                    cleaned["XAU"] = state
 
         states["VALUE"] = cleaned
 
@@ -427,208 +420,74 @@ def send_pushover(
 # VALUE STATE / THRESHOLD ENGINE
 # ============================================================
 
-def update_value_state(
-    symbol,
-    long_value,
-    short_value,
-    price=0.0,
-    long_4h=0.0,
-    short_4h=0.0,
-    long_12h=0.0,
-    short_12h=0.0,
-    allow_alert=True,
-):
+def update_value_state(symbol, long_4h, short_4h, price=0.0, allow_alert=True):
     symbol = symbol.upper().strip()
+    signed_gap = float(long_4h or 0.0) - float(short_4h or 0.0)
+    gap = abs(signed_gap)
 
-    threshold = (
-        XAU_VALUE_THRESHOLD
-        if symbol == "XAU"
-        else VALUE_THRESHOLD
-    )
+    # Trading direction is opposite the liquidated side:
+    # more LONG liquidations -> SELL; more SHORT liquidations -> BUY.
+    if signed_gap >= VALUE_THRESHOLD:
+        signal = "SELL"
+        stronger = "LONG"
+    elif signed_gap <= -VALUE_THRESHOLD:
+        signal = "BUY"
+        stronger = "SHORT"
+    else:
+        signal = None
+        stronger = "NONE"
 
-    gap, side = get_gap(
-        long_value,
-        short_value,
-    )
+    old = states["VALUE"].get(symbol, {"active": False, "side": None, "first_observed": None})
 
-    value_1h_text = format_value_timeframe(
-        "1H",
-        long_value,
-        short_value,
-    )
-
-    value_4h_text = format_value_timeframe(
-        "4H",
-        long_4h,
-        short_4h,
-    )
-
-    value_12h_text = format_value_timeframe(
-        "12H",
-        long_12h,
-        short_12h,
-    )
-
-    old = states["VALUE"].get(
-        symbol,
-        {
-            "active": False,
-            "side": None,
-            "first_observed": None,
-        },
-    )
-
-    qualifies = (
-        gap >= threshold
-        and side != "EVEN"
-    )
-
-    # --------------------------------------------------------
-    # BELOW THRESHOLD -> CLEAR
-    # --------------------------------------------------------
-
-    if not qualifies:
-        if old["active"]:
-            print(
-                f"[CLEAR] VALUE | "
-                f"{symbol} | "
-                f"previous={old['side']} | "
-                f"{now_ist()}",
-                flush=True,
-            )
-
-        states["VALUE"][symbol] = {
-            "active": False,
-            "side": None,
-            "first_observed": None,
-        }
-
+    if signal is None:
+        if old.get("active"):
+            print(f"[CLEAR] BTC 4H | previous={old.get('side')} | gap={fmt_money(gap)} | {now_ist()}", flush=True)
+        states["VALUE"][symbol] = {"active": False, "side": None, "first_observed": None}
         save_states()
         return
 
-    # --------------------------------------------------------
-    # FIRST QUALIFYING OBSERVATION
-    # --------------------------------------------------------
-
-    if not old["active"]:
+    if not old.get("active"):
         first_time = now_ist()
-
-        states["VALUE"][symbol] = {
-            "active": True,
-            "side": side,
-            "first_observed": first_time,
-        }
-
+        states["VALUE"][symbol] = {"active": True, "side": signal, "first_observed": first_time}
         save_states()
-
-        # First scan after process start/redeploy:
-        # seed current state without duplicate notification.
         if not allow_alert:
-            print(
-                f"[BOOTSTRAP ACTIVE] VALUE | "
-                f"{symbol} | "
-                f"side={side} | "
-                f"gap={gap}",
-                flush=True,
-            )
-
+            print(f"[BOOTSTRAP ACTIVE] BTC 4H | signal={signal} | stronger={stronger} | gap={fmt_money(gap)}", flush=True)
             return
-
-        title = (
-            f"COINGLASS {symbol} VALUE "
-            f"{side} ${gap / 1_000_000:.2f}M GAP"
-        )
-
+        title = f"COINGLASS BTC 4H {signal} | GAP {fmt_money(gap)}"
         message = (
-            "COINGLASS LIQUIDATION VALUE\n\n"
-            f"COIN: {symbol}\n"
-            f"PRICE: {fmt_price(price)}\n\n"
-            f"{value_1h_text}\n\n"
-            f"{value_4h_text}\n\n"
-            f"{value_12h_text}\n\n"
-            f"1H TRIGGER: {side}\n"
-            f"ACTIVE FOR: 0S"
+            "COINGLASS BTC 4H LIQUIDATION\n\n"
+            f"BTC PRICE: {fmt_price(price)}\n"
+            f"4H LONG: {fmt_money(long_4h)}\n"
+            f"4H SHORT: {fmt_money(short_4h)}\n"
+            f"DIFFERENCE: {fmt_money(gap)}\n"
+            f"MORE LIQUIDATED: {stronger}\n\n"
+            f"ALERT: {signal}"
         )
-
-        print(
-            "\n"
-            "============================================================",
-            flush=True,
-        )
-
-        print(
-            f"[NEW VALUE THRESHOLD]\n"
-            f"{message}",
-            flush=True,
-        )
-
-        print(
-            "============================================================",
-            flush=True,
-        )
-
-        send_pushover(
-            title,
-            message,
-        )
-
+        print(f"[NEW BTC 4H SIGNAL] {message}", flush=True)
+        send_pushover(title, message)
         return
 
-    # --------------------------------------------------------
-    # SAME CONDITION -> NO DUPLICATE
-    # --------------------------------------------------------
-
-    if old["side"] == side:
+    if old.get("side") == signal:
         return
 
-    # --------------------------------------------------------
-    # OPPOSITE QUALIFYING SIDE
-    # --------------------------------------------------------
-
-    old_side = old["side"]
-
-    previous_active_for = format_duration(
-        old["first_observed"]
-    )
-
+    old_side = old.get("side")
+    previous_active_for = format_duration(old.get("first_observed"))
     first_time = now_ist()
-
-    states["VALUE"][symbol] = {
-        "active": True,
-        "side": side,
-        "first_observed": first_time,
-    }
-
+    states["VALUE"][symbol] = {"active": True, "side": signal, "first_observed": first_time}
     save_states()
-
-    title = (
-        f"COINGLASS {symbol} VALUE "
-        f"{old_side}->{side}"
-    )
-
+    title = f"COINGLASS BTC 4H {old_side}->{signal}"
     message = (
-        "COINGLASS LIQUIDATION VALUE\n\n"
-        f"COIN: {symbol}\n"
-        f"PRICE: {fmt_price(price)}\n\n"
-        f"{value_1h_text}\n\n"
-        f"{value_4h_text}\n\n"
-        f"{value_12h_text}\n\n"
-        f"1H STATE: {old_side} -> {side}\n"
-        f"PREVIOUS {old_side} ACTIVE FOR: "
-        f"{previous_active_for}"
+        "COINGLASS BTC 4H LIQUIDATION\n\n"
+        f"BTC PRICE: {fmt_price(price)}\n"
+        f"4H LONG: {fmt_money(long_4h)}\n"
+        f"4H SHORT: {fmt_money(short_4h)}\n"
+        f"DIFFERENCE: {fmt_money(gap)}\n"
+        f"MORE LIQUIDATED: {stronger}\n\n"
+        f"ALERT: {old_side} -> {signal}\n"
+        f"PREVIOUS ACTIVE FOR: {previous_active_for}"
     )
-
-    print(
-        f"[SIDE CHANGE] VALUE | "
-        f"{symbol} | "
-        f"{old_side}->{side}",
-        flush=True,
-    )
-
-    send_pushover(
-        title,
-        message,
-    )
+    print(f"[BTC 4H REVERSAL] {old_side}->{signal} | gap={fmt_money(gap)}", flush=True)
+    send_pushover(title, message)
 
 
 # ============================================================
@@ -746,7 +605,7 @@ def find_value_header(lines):
 
 
 # ============================================================
-# VALUE PARSER — BTC + XAU/XAUT ONLY
+# VALUE PARSER — BTC ONLY
 # ============================================================
 
 def parse_value_rows(lines):
@@ -816,7 +675,7 @@ def parse_value_rows(lines):
             i += 1
             continue
 
-        # We only need BTC / XAU / XAUT.
+        # We only need BTC.
         # Skip all other assets immediately.
         if symbol not in TARGET_SYMBOLS:
             i += 1
@@ -916,7 +775,7 @@ def parse_value_rows(lines):
 
     if not results:
         raise RuntimeError(
-            "No BTC/XAU VALUE rows parsed"
+            "No BTC VALUE row parsed"
         )
 
     print(
@@ -931,171 +790,20 @@ def parse_value_rows(lines):
 
 
 # ============================================================
-# GOLD MERGE
-# ============================================================
-
-def merge_gold_family_rows(rows):
-    """
-    Combine CoinGlass XAU + XAUT into
-    one canonical XAU bucket.
-    """
-
-    merged = []
-
-    gold_long = 0.0
-    gold_short = 0.0
-
-    gold_long_4h = 0.0
-    gold_short_4h = 0.0
-
-    gold_long_12h = 0.0
-    gold_short_12h = 0.0
-
-    gold_price = 0.0
-    gold_seen = False
-
-    for row in rows:
-        symbol = str(
-            row.get("symbol", "")
-        ).upper().strip()
-
-        if symbol in ("XAU", "XAUT"):
-            gold_seen = True
-
-            gold_long += float(
-                row.get("long", 0.0)
-                or 0.0
-            )
-
-            gold_short += float(
-                row.get("short", 0.0)
-                or 0.0
-            )
-
-            gold_long_4h += float(
-                row.get("long_4h", 0.0)
-                or 0.0
-            )
-
-            gold_short_4h += float(
-                row.get("short_4h", 0.0)
-                or 0.0
-            )
-
-            gold_long_12h += float(
-                row.get("long_12h", 0.0)
-                or 0.0
-            )
-
-            gold_short_12h += float(
-                row.get("short_12h", 0.0)
-                or 0.0
-            )
-
-            row_price = float(
-                row.get("price", 0.0)
-                or 0.0
-            )
-
-            if (
-                symbol == "XAU"
-                and row_price > 0
-            ):
-                gold_price = row_price
-
-            elif (
-                gold_price <= 0
-                and row_price > 0
-            ):
-                gold_price = row_price
-
-        else:
-            # BTC
-            merged.append(row)
-
-    if gold_seen:
-        merged.append(
-            {
-                "symbol": "XAU",
-                "price": gold_price,
-                "long": gold_long,
-                "short": gold_short,
-                "long_4h": gold_long_4h,
-                "short_4h": gold_short_4h,
-                "long_12h": gold_long_12h,
-                "short_12h": gold_short_12h,
-            }
-        )
-
-        print(
-            f"[GOLD MERGE] "
-            f"XAU+XAUT -> XAU | "
-            f"L={gold_long} | "
-            f"S={gold_short}",
-            flush=True,
-        )
-
-    return merged
-
-
-# ============================================================
 # VALUE PROCESSING
 # ============================================================
 
-def process_value_rows(
-    rows,
-    allow_alert=True,
-):
-    rows = merge_gold_family_rows(rows)
-
-    print(
-        f"\n[VALUE SCAN] "
-        f"{now_ist()} | "
-        f"rows={len(rows)}",
-        flush=True,
-    )
-
+def process_value_rows(rows, allow_alert=True):
+    print(f"\n[BTC 4H SCAN] {now_ist()} | rows={len(rows)}", flush=True)
     for row in rows:
-        gap, side = get_gap(
-            row["long"],
-            row["short"],
-        )
-
-        print(
-            f"{row['symbol']:8} "
-            f"L={fmt_money(row['long']):>10} "
-            f"S={fmt_money(row['short']):>10} "
-            f"GAP={fmt_money(gap):>10} "
-            f"{side}",
-            flush=True,
-        )
-
-        update_value_state(
-            row["symbol"],
-            row["long"],
-            row["short"],
-            price=row.get(
-                "price",
-                0.0,
-            ),
-            long_4h=row.get(
-                "long_4h",
-                0.0,
-            ),
-            short_4h=row.get(
-                "short_4h",
-                0.0,
-            ),
-            long_12h=row.get(
-                "long_12h",
-                0.0,
-            ),
-            short_12h=row.get(
-                "short_12h",
-                0.0,
-            ),
-            allow_alert=allow_alert,
-        )
+        if row.get("symbol") != "BTC":
+            continue
+        long_4h = float(row.get("long_4h", 0.0) or 0.0)
+        short_4h = float(row.get("short_4h", 0.0) or 0.0)
+        gap = abs(long_4h - short_4h)
+        stronger = "LONG" if long_4h > short_4h else "SHORT" if short_4h > long_4h else "EVEN"
+        print(f"BTC 4H L={fmt_money(long_4h)} S={fmt_money(short_4h)} GAP={fmt_money(gap)} STRONGER={stronger}", flush=True)
+        update_value_state("BTC", long_4h, short_4h, price=row.get("price", 0.0), allow_alert=allow_alert)
 
 
 # ============================================================
@@ -1177,7 +885,7 @@ async def scan_once(page):
 
         print(
             "[BOOTSTRAP COMPLETE] "
-            "Current BTC/XAU VALUE states seeded; "
+            "Current BTC 4H state seeded; "
             "future fresh crosses/side changes "
             "can alert.",
             flush=True,
@@ -1208,7 +916,7 @@ async def scan_once(page):
 
 async def main():
     print(
-        "COINGLASS BTC + XAU VALUE "
+        "COINGLASS BTC 4H "
         "OBSERVER STARTING",
         flush=True,
     )
@@ -1227,20 +935,13 @@ async def main():
     )
 
     print(
-        f"BTC VALUE threshold: "
+        f"BTC 4H difference threshold: "
         f"{fmt_money(VALUE_THRESHOLD)}",
         flush=True,
     )
 
     print(
-        f"XAU VALUE threshold: "
-        f"{fmt_money(XAU_VALUE_THRESHOLD)}",
-        flush=True,
-    )
-
-    print(
-        "MODE: VALUE ONLY | "
-        "TARGETS: BTC + XAU/XAUT",
+        "MODE: BTC 4H LONG-vs-SHORT ONLY",
         flush=True,
     )
 
