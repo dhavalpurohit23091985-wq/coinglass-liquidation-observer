@@ -24,8 +24,8 @@ IST = ZoneInfo("Asia/Kolkata")
 PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY", "").strip()
 PUSHOVER_APP_TOKEN = os.getenv("PUSHOVER_APP_TOKEN", "").strip()
 STATE_FILE = os.getenv(
-    "COINGLASS_BTC_5M_STATE_FILE",
-    "/tmp/coinglass_btc_5m_state.json"
+    "COINGLASS_GAP_STATE_FILE",
+    "/tmp/coinglass_gap_state.json"
 ).strip()
 
 
@@ -33,12 +33,21 @@ STATE_FILE = os.getenv(
 # STATE
 # ============================================================
 
-state = {"position": "NONE", "timeframe": None}
+SYMBOLS = ("BTC", "ETH", "SOL")
+TIMEFRAMES = ("1H", "4H", "12H")
+
+state = {
+    symbol: {tf: False for tf in TIMEFRAMES}
+    for symbol in SYMBOLS
+}
 
 
 def save_state():
     tmp = f"{STATE_FILE}.tmp"
     try:
+        directory = os.path.dirname(STATE_FILE)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
         os.replace(tmp, STATE_FILE)
@@ -51,16 +60,19 @@ def load_state():
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             saved = json.load(f)
-        position = str(saved.get("position", "NONE")).upper()
-        timeframe = saved.get("timeframe")
-        if position not in {"NONE", "LONG", "SHORT"}:
-            position = "NONE"
-        if timeframe not in {"4H", "12H"}:
-            timeframe = None
-        state = {"position": position, "timeframe": timeframe}
-        print(f"[STATE RESTORED] position={position} | timeframe={timeframe}", flush=True)
+
+        restored = {
+            symbol: {tf: False for tf in TIMEFRAMES}
+            for symbol in SYMBOLS
+        }
+        for symbol in SYMBOLS:
+            if isinstance(saved.get(symbol), dict):
+                for tf in TIMEFRAMES:
+                    restored[symbol][tf] = bool(saved[symbol].get(tf, False))
+        state = restored
+        print(f"[STATE RESTORED] {state}", flush=True)
     except FileNotFoundError:
-        print("[STATE] No saved state; starting IDLE.", flush=True)
+        print("[STATE] No saved state; starting all combinations IDLE.", flush=True)
     except Exception as exc:
         print(f"[STATE RESTORE FAILED] {type(exc).__name__}: {exc}", flush=True)
 
@@ -108,6 +120,11 @@ def fmt_money(value):
     return f"${value:.2f}"
 
 
+def is_number_like(text):
+    s = clean_text(text)
+    return bool(re.fullmatch(r"[-+−]?\$?\d[\d,]*(?:\.\d+)?(?:[KMB])?%?", s, flags=re.I))
+
+
 # ============================================================
 # PUSHOVER
 # ============================================================
@@ -141,97 +158,70 @@ def send_pushover(title, message):
     return False
 
 
+# ============================================================
+# GAP MONITOR
+# ============================================================
+
 def values_for_timeframe(row, timeframe):
-    if timeframe == "4H":
-        long_value = float(row["long_4h"])
-        short_value = float(row["short_4h"])
-    else:
-        long_value = float(row["long_12h"])
-        short_value = float(row["short_12h"])
+    tf = timeframe.lower()
+    long_value = float(row[f"long_{tf}"])
+    short_value = float(row[f"short_{tf}"])
     signed_gap = long_value - short_value
-    return long_value, short_value, signed_gap, abs(signed_gap)
+    gap = abs(signed_gap)
+    dominant = "LONG" if signed_gap > 0 else "SHORT" if signed_gap < 0 else "EVEN"
+    return long_value, short_value, gap, dominant
 
 
-def entry_candidate(row):
-    # 4H first. Only if 4H is below $5M, check 12H.
-    for timeframe in ("4H", "12H"):
-        long_value, short_value, signed_gap, gap = values_for_timeframe(row, timeframe)
-        if gap >= ENTER_GAP:
-            liquidation_side = "LONG" if signed_gap > 0 else "SHORT"
-            trade_side = "SHORT" if liquidation_side == "LONG" else "LONG"
-            return {
-                "timeframe": timeframe,
-                "long": long_value,
-                "short": short_value,
-                "gap": gap,
-                "liquidation_side": liquidation_side,
-                "trade_side": trade_side,
-            }
-    return None
+def send_gap_alert(symbol, timeframe, long_value, short_value, gap, dominant, high):
+    if high:
+        title = f"{symbol} {timeframe} | GAP >= $5M | {fmt_money(gap)}"
+        status = "GAP CROSSED / REACHED $5M"
+    else:
+        title = f"{symbol} {timeframe} | GAP < $4M | {fmt_money(gap)}"
+        status = "GAP CROSSED BELOW $4M"
 
-
-def send_enter(candidate):
-    title = f"BTC {candidate['timeframe']} | ENTER {candidate['trade_side']} | GAP {fmt_money(candidate['gap'])}"
     message = "\n".join([
-        f"BTC {candidate['timeframe']}",
-        "",
-        f"LONG : {fmt_money(candidate['long'])}",
-        f"SHORT: {fmt_money(candidate['short'])}",
-        f"GAP  : {fmt_money(candidate['gap'])} {candidate['liquidation_side']}",
-        "",
-        f"ENTER {candidate['trade_side']}",
-    ])
-    send_pushover(title, message)
-
-
-def send_exit(row, position, timeframe):
-    long_value, short_value, signed_gap, gap = values_for_timeframe(row, timeframe)
-    liquidation_side = "LONG" if signed_gap > 0 else "SHORT" if signed_gap < 0 else "EVEN"
-    title = f"BTC {timeframe} | EXIT {position} | GAP {fmt_money(gap)}"
-    message = "\n".join([
-        f"BTC {timeframe}",
+        f"{symbol} {timeframe}",
         "",
         f"LONG : {fmt_money(long_value)}",
         f"SHORT: {fmt_money(short_value)}",
-        f"GAP  : {fmt_money(gap)} {liquidation_side}",
+        f"GAP  : {fmt_money(gap)}",
+        f"DOMINANT: {dominant} LIQUIDATIONS" if dominant != "EVEN" else "DOMINANT: EVEN",
         "",
-        f"EXIT {position}",
+        status,
     ])
     send_pushover(title, message)
 
 
-def process_btc(row):
-    position = state["position"]
-    active_tf = state["timeframe"]
+def process_row(row):
+    symbol = row["symbol"]
 
-    if position == "NONE":
-        candidate = entry_candidate(row)
-        if candidate is None:
-            print("[BTC] IDLE | no 4H/12H >= $5M entry gap", flush=True)
-            return
+    for timeframe in TIMEFRAMES:
+        long_value, short_value, gap, dominant = values_for_timeframe(row, timeframe)
+        active = state[symbol][timeframe]
 
-        send_enter(candidate)
-        state["position"] = candidate["trade_side"]
-        state["timeframe"] = candidate["timeframe"]
-        save_state()
-        return
+        print(
+            f"[{symbol} {timeframe}] LONG={fmt_money(long_value)} | "
+            f"SHORT={fmt_money(short_value)} | GAP={fmt_money(gap)} | "
+            f"DOM={dominant} | STATE={'ABOVE_5M' if active else 'IDLE'}",
+            flush=True,
+        )
 
-    # Once entered, exit is checked on the SAME timeframe that created entry.
-    long_value, short_value, _, gap = values_for_timeframe(row, active_tf)
-    print(
-        f"[BTC ACTIVE] {position} | {active_tf} | "
-        f"LONG={fmt_money(long_value)} | SHORT={fmt_money(short_value)} | GAP={fmt_money(gap)}",
-        flush=True,
-    )
+        # One alert when gap reaches/crosses $5M.
+        # No repeats at $6M/$7M/$8M...
+        if not active and gap >= ENTER_GAP:
+            send_gap_alert(symbol, timeframe, long_value, short_value, gap, dominant, True)
+            state[symbol][timeframe] = True
+            save_state()
+            continue
 
-    if gap < EXIT_GAP:
-        send_exit(row, position, active_tf)
-        state["position"] = "NONE"
-        state["timeframe"] = None
-        save_state()
-        return
-
-    print(f"[BTC HOLD] {position} | exit only when {active_tf} gap < $4M", flush=True)
+        # After that, one reset alert only when gap crosses BELOW $4M.
+        # Exact $4.00M does not reset; e.g. $3.99M does.
+        # No repeats at $3M/$2M/$1M...
+        if active and gap < EXIT_GAP:
+            send_gap_alert(symbol, timeframe, long_value, short_value, gap, dominant, False)
+            state[symbol][timeframe] = False
+            save_state()
 
 
 # ============================================================
@@ -281,19 +271,16 @@ async def wait_for_liquidation_section(page):
 
 
 # ============================================================
-# BTC PARSER
+# BTC / ETH / SOL PARSER
 # ============================================================
-
-def is_number_like(text):
-    s = clean_text(text)
-    return bool(re.fullmatch(r"[-+−]?\$?\d[\d,]*(?:\.\d+)?(?:[KMB])?%?", s, flags=re.I))
-
 
 def find_value_header(lines):
     for i in range(len(lines)):
-        block = " ".join(lines[i:i + 20]).lower()
+        block = " ".join(lines[i:i + 24]).lower()
         if (
             "assets" in block
+            and "1h long" in block
+            and "1h short" in block
             and "4h long" in block
             and "4h short" in block
             and "12h long" in block
@@ -303,36 +290,43 @@ def find_value_header(lines):
     raise RuntimeError("VALUE liquidation header not found")
 
 
-def parse_btc_row(lines):
-    header_index = find_value_header(lines)
-    search_lines = lines[header_index + 1: header_index + 250]
-
+def parse_symbol_row(search_lines, symbol):
     for i, item in enumerate(search_lines):
-        if clean_text(item).upper() != "BTC":
+        if clean_text(item).upper() != symbol:
             continue
 
         numbers = []
-        for candidate in search_lines[i + 1:i + 20]:
+        for candidate in search_lines[i + 1:i + 24]:
             if is_number_like(candidate):
                 numbers.append(candidate)
 
         # price, 24h%, 1hL, 1hS, 4hL, 4hS, 12hL, 12hS...
         if len(numbers) >= 8:
             row = {
-                "symbol": "BTC",
+                "symbol": symbol,
+                "long_1h": parse_number(numbers[2]),
+                "short_1h": parse_number(numbers[3]),
                 "long_4h": parse_number(numbers[4]),
                 "short_4h": parse_number(numbers[5]),
                 "long_12h": parse_number(numbers[6]),
                 "short_12h": parse_number(numbers[7]),
             }
             print(
-                f"[PARSED BTC] 4H L={numbers[4]} S={numbers[5]} | "
+                f"[PARSED {symbol}] "
+                f"1H L={numbers[2]} S={numbers[3]} | "
+                f"4H L={numbers[4]} S={numbers[5]} | "
                 f"12H L={numbers[6]} S={numbers[7]}",
                 flush=True,
             )
             return row
 
-    raise RuntimeError("BTC liquidation row not parsed")
+    raise RuntimeError(f"{symbol} liquidation row not parsed")
+
+
+def parse_rows(lines):
+    header_index = find_value_header(lines)
+    search_lines = lines[header_index + 1:header_index + 400]
+    return {symbol: parse_symbol_row(search_lines, symbol) for symbol in SYMBOLS}
 
 
 # ============================================================
@@ -360,8 +354,10 @@ async def scan_once(page):
     await wait_for_liquidation_section(page)
 
     lines = await get_rendered_lines(page)
-    btc = parse_btc_row(lines)
-    process_btc(btc)
+    rows = parse_rows(lines)
+
+    for symbol in SYMBOLS:
+        process_row(rows[symbol])
 
     print(f"[SCAN OK] {now_ist()}", flush=True)
 
@@ -371,30 +367,25 @@ async def scan_once(page):
 # ============================================================
 
 async def main():
-    print("COINGLASS BTC 5M ENTER / 4M EXIT OBSERVER STARTING", flush=True)
+    print("COINGLASS BTC + ETH + SOL GAP OBSERVER STARTING", flush=True)
     load_state()
     print(f"URL: {URL}", flush=True)
     print(f"SCAN: every {SCAN_SECONDS} seconds", flush=True)
-    print("ENTER: 4H first -> 12H fallback | gap >= $5M", flush=True)
-    print("EXIT: same entry timeframe | gap < $4M", flush=True)
-    print("LONG liquidation gap -> ENTER SHORT", flush=True)
-    print("SHORT liquidation gap -> ENTER LONG", flush=True)
+    print("COINS: BTC, ETH, SOL", flush=True)
+    print("TIMEFRAMES: 1H, 4H, 12H - independent", flush=True)
+    print("ALERT ONCE: gap >= $5M", flush=True)
+    print("RESET ALERT ONCE: gap < $4M", flush=True)
+    print("NO BUY/SELL DECISION", flush=True)
     print(f"PUSHOVER: {'READY' if pushover_ready() else 'NOT CONFIGURED'}", flush=True)
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
         )
 
         context = await browser.new_context(
-            viewport={
-                "width": 1600,
-                "height": 1200,
-            },
+            viewport={"width": 1600, "height": 1200},
             locale="en-US",
             timezone_id="Asia/Kolkata",
             user_agent=(
@@ -408,38 +399,19 @@ async def main():
 
         while True:
             cycle_started = datetime.now(IST)
-
             try:
                 await scan_once(page)
-
             except Exception as exc:
                 print(
-                    f"\n[SCAN FAILED] "
-                    f"{now_ist()} | "
-                    f"{type(exc).__name__}: "
-                    f"{exc}",
+                    f"\n[SCAN FAILED] {now_ist()} | "
+                    f"{type(exc).__name__}: {exc}",
                     flush=True,
                 )
 
-            elapsed = (
-                datetime.now(IST)
-                - cycle_started
-            ).total_seconds()
-
-            sleep_for = max(
-                5,
-                SCAN_SECONDS - elapsed,
-            )
-
-            print(
-                f"[NEXT SCAN] approximately "
-                f"{int(sleep_for)} seconds",
-                flush=True,
-            )
-
-            await asyncio.sleep(
-                sleep_for
-            )
+            elapsed = (datetime.now(IST) - cycle_started).total_seconds()
+            sleep_for = max(5, SCAN_SECONDS - elapsed)
+            print(f"[NEXT SCAN] approximately {int(sleep_for)} seconds", flush=True)
+            await asyncio.sleep(sleep_for)
 
 
 if __name__ == "__main__":
