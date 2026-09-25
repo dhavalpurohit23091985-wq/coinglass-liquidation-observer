@@ -17,7 +17,7 @@ URL = "https://www.coinglass.com/liquidations"
 
 SCAN_SECONDS = 60
 TOP_N = 10
-GAP_THRESHOLD = 5_000_000.0
+GAP_THRESHOLD = 1_000_000.0
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -32,42 +32,88 @@ PUSHOVER_APP_TOKEN = os.getenv(
 ).strip()
 
 STATE_FILE = os.getenv(
-    "COINGLASS_TOP10_2OF3_STATE_FILE",
-    "/tmp/coinglass_top10_2of3_state.json"
+    "COINGLASS_24H_1M_STATE_FILE",
+    "/tmp/coinglass_24h_1m_state.json"
 ).strip()
-
-TIMEFRAMES = ("1H", "4H", "12H")
-
-state = {}
 
 
 # ============================================================
 # STATE
+#
+# Per coin:
+#
+# NONE = no previous alert
+# BUY  = last alert BUY
+# SELL = last alert SELL
+#
+# BUY -> BUY repeat blocked
+# SELL -> SELL repeat blocked
+#
+# BUY -> SELL allowed
+# SELL -> BUY allowed
 # ============================================================
 
-def default_symbol_state():
-    return {
-        "BUY": False,
-        "SELL": False,
-    }
+state = {}
 
 
-def ensure_symbol_state(symbol):
-    if symbol not in state:
-        state[symbol] = default_symbol_state()
+def load_state():
+    global state
+
+    try:
+        with open(
+            STATE_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+            saved = json.load(f)
+
+        if isinstance(saved, dict):
+            state = {
+                str(symbol).upper(): str(side).upper()
+                for symbol, side in saved.items()
+                if str(side).upper() in (
+                    "NONE",
+                    "BUY",
+                    "SELL"
+                )
+            }
+
+        print(
+            f"[STATE RESTORED] {state}",
+            flush=True
+        )
+
+    except FileNotFoundError:
+        state = {}
+
+        print(
+            "[STATE] No saved state. Starting fresh.",
+            flush=True
+        )
+
+    except Exception as exc:
+        state = {}
+
+        print(
+            f"[STATE RESTORE FAILED] "
+            f"{type(exc).__name__}: {exc}",
+            flush=True
+        )
 
 
 def save_state():
-    tmp = f"{STATE_FILE}.tmp"
-
     try:
-        directory = os.path.dirname(STATE_FILE)
+        directory = os.path.dirname(
+            STATE_FILE
+        )
 
         if directory:
             os.makedirs(
                 directory,
                 exist_ok=True
             )
+
+        tmp = STATE_FILE + ".tmp"
 
         with open(
             tmp,
@@ -93,61 +139,8 @@ def save_state():
         )
 
 
-def load_state():
-    global state
-
-    try:
-        with open(
-            STATE_FILE,
-            "r",
-            encoding="utf-8"
-        ) as f:
-            saved = json.load(f)
-
-        restored = {}
-
-        if isinstance(saved, dict):
-
-            for symbol, data in saved.items():
-
-                if not isinstance(data, dict):
-                    continue
-
-                restored[
-                    str(symbol).upper()
-                ] = {
-                    "BUY": bool(
-                        data.get("BUY", False)
-                    ),
-                    "SELL": bool(
-                        data.get("SELL", False)
-                    ),
-                }
-
-        state = restored
-
-        print(
-            f"[STATE RESTORED] {state}",
-            flush=True
-        )
-
-    except FileNotFoundError:
-        print(
-            "[STATE] No saved state. "
-            "Starting fresh.",
-            flush=True
-        )
-
-    except Exception as exc:
-        print(
-            f"[STATE RESTORE FAILED] "
-            f"{type(exc).__name__}: {exc}",
-            flush=True
-        )
-
-
 # ============================================================
-# BASIC HELPERS
+# HELPERS
 # ============================================================
 
 def now_ist():
@@ -171,7 +164,9 @@ def clean_text(value):
 
 
 def parse_number(text):
-    s = clean_text(text).upper()
+    s = clean_text(
+        text
+    ).upper()
 
     if not s:
         return 0.0
@@ -228,7 +223,9 @@ def fmt_money(value):
 
 
 def is_number_like(text):
-    s = clean_text(text)
+    s = clean_text(
+        text
+    )
 
     return bool(
         re.fullmatch(
@@ -244,17 +241,17 @@ def is_number_like(text):
 # ============================================================
 
 def looks_like_symbol(text):
-    s = clean_text(text).upper()
+    s = clean_text(
+        text
+    ).upper()
 
     if not s:
         return False
 
-    # Rank numbers such as 1, 2, 3 must NEVER
-    # be treated as coin symbols.
+    # Rank numbers must never become symbols.
     if s.isdigit():
         return False
 
-    # Normal crypto ticker format.
     if not re.fullmatch(
         r"[A-Z][A-Z0-9]{1,11}",
         s
@@ -287,6 +284,8 @@ def looks_like_symbol(text):
         "MARKETS",
         "EXCHANGE",
         "EXCHANGES",
+        "TRADE",
+        "RATE",
         "1H",
         "4H",
         "12H",
@@ -307,16 +306,15 @@ def pushover_ready():
     )
 
 
-def send_pushover(title, message):
-
+def send_pushover(
+    title,
+    message
+):
     if not pushover_ready():
-
         print(
-            "[PUSHOVER] "
-            "Not configured - notification skipped",
+            "[PUSHOVER] Not configured - skipped",
             flush=True
         )
-
         return False
 
     try:
@@ -333,12 +331,10 @@ def send_pushover(title, message):
         )
 
         if response.ok:
-
             print(
                 f"[PUSHOVER SENT] {title}",
                 flush=True
             )
-
             return True
 
         print(
@@ -349,7 +345,6 @@ def send_pushover(title, message):
         )
 
     except Exception as exc:
-
         print(
             f"[PUSHOVER FAILED] "
             f"{type(exc).__name__}: {exc}",
@@ -360,11 +355,10 @@ def send_pushover(title, message):
 
 
 # ============================================================
-# PAGE HELPERS
+# PAGE
 # ============================================================
 
 async def get_rendered_lines(page):
-
     body_text = await page.locator(
         "body"
     ).inner_text(
@@ -374,15 +368,17 @@ async def get_rendered_lines(page):
     lines = []
 
     for line in body_text.splitlines():
-
-        line = clean_text(line)
+        line = clean_text(
+            line
+        )
 
         if line:
-            lines.append(line)
+            lines.append(
+                line
+            )
 
     print(
-        f"[DEBUG] Rendered text lines="
-        f"{len(lines)}",
+        f"[DEBUG] Rendered text lines={len(lines)}",
         flush=True
     )
 
@@ -390,7 +386,6 @@ async def get_rendered_lines(page):
 
 
 async def wait_for_liquidation_section(page):
-
     await page.get_by_text(
         "Total Liquidations",
         exact=False
@@ -400,21 +395,35 @@ async def wait_for_liquidation_section(page):
     )
 
     print(
-        "[PAGE] Total Liquidations section visible",
+        "[PAGE] Total Liquidations visible",
         flush=True
     )
 
 
 # ============================================================
-# FIND LIQUIDATION VALUE TABLE
+# FIND COIN TABLE
+#
+# Required columns:
+#
+# Assets
+# Price
+# Price (24h%)
+# 1h Long
+# 1h Short
+# 4h Long
+# 4h Short
+# 12h Long
+# 12h Short
+# 24h Long
+# 24h Short
 # ============================================================
 
 def find_value_header(lines):
-
-    for i in range(len(lines)):
-
+    for i in range(
+        len(lines)
+    ):
         block = " ".join(
-            lines[i:i + 24]
+            lines[i:i + 35]
         ).lower()
 
         if (
@@ -425,16 +434,31 @@ def find_value_header(lines):
             and "4h short" in block
             and "12h long" in block
             and "12h short" in block
+            and "24h long" in block
+            and "24h short" in block
         ):
             return i
 
     raise RuntimeError(
-        "VALUE liquidation header not found"
+        "24H liquidation table header not found"
     )
 
 
 # ============================================================
-# PARSE ONE REAL COIN ROW
+# PARSE ONE COIN
+#
+# Expected numeric fields after symbol:
+#
+# 0 price
+# 1 price 24h %
+# 2 1h long
+# 3 1h short
+# 4 4h long
+# 5 4h short
+# 6 12h long
+# 7 12h short
+# 8 24h long
+# 9 24h short
 # ============================================================
 
 def parse_coin_at(
@@ -442,97 +466,75 @@ def parse_coin_at(
     symbol_index
 ):
     symbol = clean_text(
-        search_lines[symbol_index]
+        search_lines[
+            symbol_index
+        ]
     ).upper()
 
-    if not looks_like_symbol(symbol):
+    if not looks_like_symbol(
+        symbol
+    ):
         return None
 
     numbers = []
 
-    # Collect the numeric fields immediately following
-    # the actual symbol.
-    #
-    # Expected:
-    # price
-    # 24h %
-    # 1H long
-    # 1H short
-    # 4H long
-    # 4H short
-    # 12H long
-    # 12H short
-
     for candidate in search_lines[
         symbol_index + 1:
-        symbol_index + 20
+        symbol_index + 24
     ]:
-
         candidate_clean = clean_text(
             candidate
         )
 
-        # IMPORTANT:
-        # If another valid symbol appears before we
-        # collected the complete row, this was not
-        # a valid row start.
+        # Another symbol before complete row
+        # means this was not a valid row start.
         if (
-            looks_like_symbol(candidate_clean)
-            and not is_number_like(candidate_clean)
+            looks_like_symbol(
+                candidate_clean
+            )
+            and not is_number_like(
+                candidate_clean
+            )
         ):
             return None
 
-        if is_number_like(candidate_clean):
-
+        if is_number_like(
+            candidate_clean
+        ):
             numbers.append(
                 candidate_clean
             )
 
-            if len(numbers) == 8:
+            if len(numbers) == 10:
                 break
 
-    if len(numbers) != 8:
+    if len(numbers) != 10:
+        return None
+
+    long_24h = parse_number(
+        numbers[8]
+    )
+
+    short_24h = parse_number(
+        numbers[9]
+    )
+
+    if (
+        long_24h <= 0
+        and short_24h <= 0
+    ):
         return None
 
     row = {
         "symbol": symbol,
-
-        "long_1h":
-            parse_number(numbers[2]),
-
-        "short_1h":
-            parse_number(numbers[3]),
-
-        "long_4h":
-            parse_number(numbers[4]),
-
-        "short_4h":
-            parse_number(numbers[5]),
-
-        "long_12h":
-            parse_number(numbers[6]),
-
-        "short_12h":
-            parse_number(numbers[7]),
+        "long_24h": long_24h,
+        "short_24h": short_24h,
     }
-
-    total_liquidation = (
-        row["long_1h"]
-        + row["short_1h"]
-        + row["long_4h"]
-        + row["short_4h"]
-        + row["long_12h"]
-        + row["short_12h"]
-    )
-
-    if total_liquidation <= 0:
-        return None
 
     print(
         f"[PARSED {symbol}] "
-        f"1H L={numbers[2]} S={numbers[3]} | "
-        f"4H L={numbers[4]} S={numbers[5]} | "
-        f"12H L={numbers[6]} S={numbers[7]}",
+        f"24H LONG={fmt_money(long_24h)} | "
+        f"SHORT={fmt_money(short_24h)}",
         flush=True
     )
 
@@ -540,30 +542,39 @@ def parse_coin_at(
 
 
 # ============================================================
-# PARSE TOP 10 ACTUAL COINS
+# PARSE TABLE
+#
+# We collect enough valid rows to obtain:
+#
+# - current Top-10
+# - BTC separately if BTC is outside Top-10
+#
+# BTC is not duplicated if already inside Top-10.
 # ============================================================
 
-def parse_top_rows(lines):
-
+def parse_monitor_rows(lines):
     header_index = find_value_header(
         lines
     )
 
     search_lines = lines[
         header_index + 1:
-        header_index + 800
+        header_index + 1200
     ]
 
-    rows = []
+    all_rows = []
     seen = set()
 
-    for i, item in enumerate(search_lines):
-
+    for i, item in enumerate(
+        search_lines
+    ):
         symbol = clean_text(
             item
         ).upper()
 
-        if not looks_like_symbol(symbol):
+        if not looks_like_symbol(
+            symbol
+        ):
             continue
 
         if symbol in seen:
@@ -577,489 +588,321 @@ def parse_top_rows(lines):
         if row is None:
             continue
 
-        rows.append(row)
-        seen.add(symbol)
-
-        if len(rows) == TOP_N:
-            break
-
-    if len(rows) < TOP_N:
-
-        raise RuntimeError(
-            f"Only {len(rows)} real coin rows parsed; "
-            f"expected {TOP_N}"
+        all_rows.append(
+            row
         )
 
+        seen.add(
+            symbol
+        )
+
+    if len(all_rows) < TOP_N:
+        raise RuntimeError(
+            f"Only {len(all_rows)} real coin rows parsed; "
+            f"need at least {TOP_N}"
+        )
+
+    top10 = all_rows[
+        :TOP_N
+    ]
+
+    monitor_rows = list(
+        top10
+    )
+
+    # BTC separately monitored even if
+    # it is not currently in the Top-10.
+    if not any(
+        row["symbol"] == "BTC"
+        for row in monitor_rows
+    ):
+        btc_row = next(
+            (
+                row
+                for row in all_rows
+                if row["symbol"] == "BTC"
+            ),
+            None
+        )
+
+        if btc_row is not None:
+            monitor_rows.insert(
+                0,
+                btc_row
+            )
+        else:
+            print(
+                "[WARNING] BTC row not found",
+                flush=True
+            )
+
     print(
-        "[TOP-10 COINS] "
+        "[TOP-10] "
         + ", ".join(
             row["symbol"]
-            for row in rows
+            for row in top10
         ),
         flush=True
     )
 
-    return rows
-
-
-# ============================================================
-# ANALYSE ONE COIN
-# ============================================================
-
-def analyse_coin(row):
-
-    symbol = row["symbol"]
-
-    buy_lines = []
-    sell_lines = []
-
     print(
-        f"\n[{symbol}] CHECKING 1H / 4H / 12H",
+        "[MONITORING] "
+        + ", ".join(
+            row["symbol"]
+            for row in monitor_rows
+        ),
         flush=True
     )
 
-    for timeframe in TIMEFRAMES:
+    return monitor_rows
 
-        tf = timeframe.lower()
+
+# ============================================================
+# SIGNAL
+#
+# SHORT - LONG >= $1M = BUY
+#
+# LONG - SHORT >= $1M = SELL
+#
+# Otherwise NONE.
+# ============================================================
+
+def get_signal(row):
+    long_value = float(
+        row["long_24h"]
+    )
+
+    short_value = float(
+        row["short_24h"]
+    )
+
+    difference = (
+        short_value
+        - long_value
+    )
+
+    if difference >= GAP_THRESHOLD:
+        return (
+            "BUY",
+            abs(difference)
+        )
+
+    if difference <= -GAP_THRESHOLD:
+        return (
+            "SELL",
+            abs(difference)
+        )
+
+    return (
+        "NONE",
+        abs(difference)
+    )
+
+
+# ============================================================
+# PROCESS
+#
+# Example:
+#
+# BTC:
+#
+# +$1.10M SHORT gap -> BUY alert
+# +$2.00M SHORT gap -> NO repeat
+# +$3.00M SHORT gap -> NO repeat
+#
+# Then:
+#
+# +$1.20M LONG gap -> SELL alert
+#
+# Then BUY becomes eligible again.
+#
+# Falling below $1M does NOT by itself
+# re-arm the same side.
+#
+# Only an opposite-side trigger changes state.
+# ============================================================
+
+def process_rows(rows):
+    current_symbols = {
+        row["symbol"]
+        for row in rows
+    }
+
+    changed = False
+
+    # Remove coins no longer monitored.
+    # BTC remains because it is separately monitored.
+    for old_symbol in list(
+        state.keys()
+    ):
+        if old_symbol not in current_symbols:
+            print(
+                f"[STATE REMOVE] "
+                f"{old_symbol} no longer monitored",
+                flush=True
+            )
+
+            del state[
+                old_symbol
+            ]
+
+            changed = True
+
+    fresh_alerts = []
+
+    for row in rows:
+        symbol = row[
+            "symbol"
+        ]
 
         long_value = float(
-            row[f"long_{tf}"]
+            row["long_24h"]
         )
 
         short_value = float(
-            row[f"short_{tf}"]
+            row["short_24h"]
         )
 
-        buy_gap = (
-            short_value
-            - long_value
+        signal, gap = get_signal(
+            row
         )
 
-        sell_gap = (
-            long_value
-            - short_value
+        previous = state.get(
+            symbol,
+            "NONE"
         )
 
-        # ====================================================
-        # BUY
-        # SHORT - LONG >= $5M
-        # ====================================================
+        print(
+            f"[{symbol}] "
+            f"24H LONG={fmt_money(long_value)} | "
+            f"SHORT={fmt_money(short_value)} | "
+            f"GAP={fmt_money(gap)} | "
+            f"NOW={signal} | "
+            f"LAST={previous}",
+            flush=True
+        )
 
-        if buy_gap >= GAP_THRESHOLD:
+        # Below $1M:
+        # do nothing.
+        # Previous direction remains remembered.
+        if signal == "NONE":
+            continue
 
-            buy_lines.append(
-                f"{timeframe} | "
-                f"LONG {fmt_money(long_value)} | "
-                f"SHORT {fmt_money(short_value)} | "
-                f"GAP {fmt_money(buy_gap)} SHORT ✓ BUY"
-            )
-
+        # Same direction:
+        # no repeat alert.
+        if signal == previous:
             print(
-                f"[{symbol} {timeframe}] "
-                f"BUY QUALIFY | "
-                f"GAP={fmt_money(buy_gap)}",
+                f"[{symbol}] "
+                f"SAME {signal} SIDE - NO REPEAT",
                 flush=True
             )
+            continue
 
-        # ====================================================
-        # SELL
-        # LONG - SHORT >= $5M
-        # ====================================================
+        # Fresh initial signal OR opposite signal.
+        state[
+            symbol
+        ] = signal
 
-        elif sell_gap >= GAP_THRESHOLD:
+        changed = True
 
-            sell_lines.append(
-                f"{timeframe} | "
-                f"LONG {fmt_money(long_value)} | "
-                f"SHORT {fmt_money(short_value)} | "
-                f"GAP {fmt_money(sell_gap)} LONG ✓ SELL"
+        if signal == "BUY":
+            side_text = (
+                "SHORT - LONG"
             )
-
-            print(
-                f"[{symbol} {timeframe}] "
-                f"SELL QUALIFY | "
-                f"GAP={fmt_money(sell_gap)}",
-                flush=True
-            )
+            emoji = "🟢"
 
         else:
-
-            print(
-                f"[{symbol} {timeframe}] "
-                f"NO QUALIFY | "
-                f"LONG={fmt_money(long_value)} | "
-                f"SHORT={fmt_money(short_value)}",
-                flush=True
+            side_text = (
+                "LONG - SHORT"
             )
+            emoji = "🔴"
 
-    buy_active = (
-        len(buy_lines) >= 2
-    )
-
-    sell_active = (
-        len(sell_lines) >= 2
-    )
-
-    print(
-        f"[{symbol} RESULT] "
-        f"BUY={len(buy_lines)}/3 "
-        f"{'ACTIVE' if buy_active else 'NO'} | "
-        f"SELL={len(sell_lines)}/3 "
-        f"{'ACTIVE' if sell_active else 'NO'}",
-        flush=True
-    )
-
-    return {
-        "symbol": symbol,
-        "buy_active": buy_active,
-        "sell_active": sell_active,
-        "buy_lines": buy_lines,
-        "sell_lines": sell_lines,
-    }
-
-
-# ============================================================
-# FORMAT ONE COIN SECTION
-# ============================================================
-
-def coin_section(
-    result,
-    side
-):
-    symbol = result["symbol"]
-
-    if side == "BUY":
-
-        lines = [
-            f"🟢 {symbol} BUY"
-        ]
-
-        lines.extend(
-            result["buy_lines"]
+        fresh_alerts.append(
+            {
+                "symbol": symbol,
+                "signal": signal,
+                "emoji": emoji,
+                "long": long_value,
+                "short": short_value,
+                "gap": gap,
+                "side_text": side_text,
+                "previous": previous,
+            }
         )
 
-    else:
-
-        lines = [
-            f"🔴 {symbol} SELL"
-        ]
-
-        lines.extend(
-            result["sell_lines"]
+        print(
+            f"[FRESH {signal}] "
+            f"{symbol} | "
+            f"{side_text}={fmt_money(gap)}",
+            flush=True
         )
 
-    return "\n".join(lines)
-
-
-# ============================================================
-# BUILD ALERT
-#
-# FRESH COINS FIRST
-# ALREADY ACTIVE COINS BELOW
-# ============================================================
-
-def build_alert_message(
-    analyses,
-    fresh_keys
-):
-    fresh_sections = []
-    existing_sections = []
-
-    for result in analyses:
-
-        symbol = result["symbol"]
-
-        if result["buy_active"]:
-
-            key = (
-                symbol,
-                "BUY"
-            )
-
-            section = coin_section(
-                result,
-                "BUY"
-            )
-
-            if key in fresh_keys:
-                fresh_sections.append(section)
-            else:
-                existing_sections.append(section)
-
-        if result["sell_active"]:
-
-            key = (
-                symbol,
-                "SELL"
-            )
-
-            section = coin_section(
-                result,
-                "SELL"
-            )
-
-            if key in fresh_keys:
-                fresh_sections.append(section)
-            else:
-                existing_sections.append(section)
-
-    all_sections = (
-        fresh_sections
-        + existing_sections
-    )
-
-    return "\n\n".join(
-        all_sections
-    )
-
-
-# ============================================================
-# PROCESS TOP 10
-# ============================================================
-
-def process_top10(rows):
-
-    analyses = [
-        analyse_coin(row)
-        for row in rows
-    ]
-
-    current_symbols = {
-        result["symbol"]
-        for result in analyses
-    }
-
-    fresh_keys = set()
-    fresh_names = []
-
-    state_changed = False
-
-    # ========================================================
-    # IMPORTANT:
-    #
-    # Coin is no longer inside current Top-10:
-    # remove old state.
-    #
-    # If it later returns to Top-10 already qualifying,
-    # it can trigger fresh again.
-    # ========================================================
-
-    for old_symbol in list(state.keys()):
-
-        if old_symbol not in current_symbols:
-
-            print(
-                f"[STATE REMOVE] "
-                f"{old_symbol} left current Top-10",
-                flush=True
-            )
-
-            del state[old_symbol]
-            state_changed = True
-
-    # ========================================================
-    # CHECK EACH CURRENT TOP-10 COIN
-    # ========================================================
-
-    for result in analyses:
-
-        symbol = result["symbol"]
-
-        ensure_symbol_state(
-            symbol
-        )
-
-        buy_now = result[
-            "buy_active"
-        ]
-
-        sell_now = result[
-            "sell_active"
-        ]
-
-        buy_before = state[
-            symbol
-        ][
-            "BUY"
-        ]
-
-        sell_before = state[
-            symbol
-        ][
-            "SELL"
-        ]
-
-        # ====================================================
-        # FRESH BUY
-        # ====================================================
-
-        if (
-            buy_now
-            and not buy_before
-        ):
-
-            fresh_keys.add(
-                (
-                    symbol,
-                    "BUY"
-                )
-            )
-
-            fresh_names.append(
-                f"{symbol} BUY"
-            )
-
-            print(
-                f"[FRESH TRIGGER] "
-                f"{symbol} BUY",
-                flush=True
-            )
-
-        # ====================================================
-        # FRESH SELL
-        # ====================================================
-
-        if (
-            sell_now
-            and not sell_before
-        ):
-
-            fresh_keys.add(
-                (
-                    symbol,
-                    "SELL"
-                )
-            )
-
-            fresh_names.append(
-                f"{symbol} SELL"
-            )
-
-            print(
-                f"[FRESH TRIGGER] "
-                f"{symbol} SELL",
-                flush=True
-            )
-
-        # ====================================================
-        # SILENT BUY RE-ARM
-        # ====================================================
-
-        if (
-            buy_before
-            and not buy_now
-        ):
-
-            print(
-                f"[RE-ARM] "
-                f"{symbol} BUY "
-                f"2/3 condition broke",
-                flush=True
-            )
-
-        # ====================================================
-        # SILENT SELL RE-ARM
-        # ====================================================
-
-        if (
-            sell_before
-            and not sell_now
-        ):
-
-            print(
-                f"[RE-ARM] "
-                f"{symbol} SELL "
-                f"2/3 condition broke",
-                flush=True
-            )
-
-        if buy_before != buy_now:
-
-            state[
-                symbol
-            ][
-                "BUY"
-            ] = buy_now
-
-            state_changed = True
-
-        if sell_before != sell_now:
-
-            state[
-                symbol
-            ][
-                "SELL"
-            ] = sell_now
-
-            state_changed = True
-
-    # Save new state
-    if state_changed:
+    if changed:
         save_state()
 
-    # ========================================================
-    # NO FRESH $5M 2/3 TRIGGER
-    # ========================================================
-
-    if not fresh_keys:
-
+    if not fresh_alerts:
         print(
-            "\n[ALERT] "
-            "No fresh 2-of-3 $5M trigger. "
-            "No Pushover.",
+            "[ALERT] No fresh $1M 24H trigger.",
             flush=True
         )
-
         return
 
-    # ========================================================
-    # FRESH COIN(S) AT TOP
-    #
-    # ALL OTHER CURRENTLY QUALIFYING COINS BELOW
-    # ========================================================
+    sections = []
 
-    message = build_alert_message(
-        analyses,
-        fresh_keys
+    for item in fresh_alerts:
+        symbol = item[
+            "symbol"
+        ]
+
+        signal = item[
+            "signal"
+        ]
+
+        previous = item[
+            "previous"
+        ]
+
+        if previous in (
+            "BUY",
+            "SELL"
+        ):
+            transition = (
+                f"{previous} -> {signal}"
+            )
+        else:
+            transition = signal
+
+        section = (
+            f"{item['emoji']} "
+            f"{symbol} {signal}\n"
+            f"24H LONG: "
+            f"{fmt_money(item['long'])}\n"
+            f"24H SHORT: "
+            f"{fmt_money(item['short'])}\n"
+            f"GAP: "
+            f"{fmt_money(item['gap'])} "
+            f"{item['side_text']}\n"
+            f"STATE: {transition}"
+        )
+
+        sections.append(
+            section
+        )
+
+    message = "\n\n".join(
+        sections
     )
 
-    if not message:
-
-        print(
-            "[ALERT ERROR] "
-            "Fresh trigger exists but "
-            "snapshot is empty.",
-            flush=True
-        )
-
-        return
-
     title = (
-        "TOP-10 LIQUIDATION ALERT"
+        "24H $1M LIQUIDATION ALERT"
     )
 
     print(
         "\n"
         "============================================================\n"
-        "TOP-10 LIQUIDATION ALERT\n"
-        "============================================================",
-        flush=True
-    )
-
-    print(
-        f"FRESH: "
-        f"{', '.join(fresh_names)}",
-        flush=True
-    )
-
-    print(
-        "\n"
-        + message
-        + "\n",
-        flush=True
-    )
-
-    print(
+        f"{title}\n"
+        "============================================================\n"
+        f"{message}\n"
         "============================================================",
         flush=True
     )
@@ -1075,7 +918,6 @@ def process_top10(rows):
 # ============================================================
 
 async def scan_once(page):
-
     print(
         "\n"
         "############################################################\n"
@@ -1110,7 +952,6 @@ async def scan_once(page):
         response is not None
         and response.status >= 400
     ):
-
         raise RuntimeError(
             f"CoinGlass HTTP "
             f"{response.status}"
@@ -1121,8 +962,7 @@ async def scan_once(page):
     )
 
     print(
-        f"[PAGE] "
-        f"title={await page.title()}",
+        f"[PAGE] title={await page.title()}",
         flush=True
     )
 
@@ -1134,11 +974,11 @@ async def scan_once(page):
         page
     )
 
-    rows = parse_top_rows(
+    rows = parse_monitor_rows(
         lines
     )
 
-    process_top10(
+    process_rows(
         rows
     )
 
@@ -1153,10 +993,11 @@ async def scan_once(page):
 # ============================================================
 
 async def main():
-
     print(
-        "COINGLASS TOP-10 "
-        "2-OF-3 $5M GAP OBSERVER STARTING",
+        "\n"
+        "============================================================\n"
+        "COINGLASS BTC + TOP-10 24H $1M OBSERVER\n"
+        "============================================================",
         flush=True
     )
 
@@ -1168,68 +1009,47 @@ async def main():
     )
 
     print(
-        f"SCAN: every "
-        f"{SCAN_SECONDS} seconds",
+        f"SCAN: every {SCAN_SECONDS} seconds",
         flush=True
     )
 
     print(
-        "COINS: CoinGlass Top 10 actual coin rows",
+        "DATA: 24H LONG / 24H SHORT ONLY",
         flush=True
     )
 
     print(
-        "TIMEFRAMES: 1H / 4H / 12H",
+        "BUY: SHORT - LONG >= $1M",
         flush=True
     )
 
     print(
-        "BUY TF: SHORT - LONG >= $5M",
+        "SELL: LONG - SHORT >= $1M",
         flush=True
     )
 
     print(
-        "SELL TF: LONG - SHORT >= $5M",
+        "SAME-SIDE REPEAT: NO",
         flush=True
     )
 
     print(
-        "TRIGGER: minimum 2/3 same-side TFs",
+        "OPPOSITE SIDE: ALERT + STATE FLIP",
         flush=True
     )
 
     print(
-        "FRESH TRIGGER COIN: shown first",
+        "DROP BELOW $1M: NO ALERT / STATE KEPT",
         flush=True
     )
 
     print(
-        "OTHER ACTIVE COINS: shown below",
+        "1H / 4H / 12H LOGIC: REMOVED",
         flush=True
     )
 
     print(
-        "REPEAT ALERT: NO while condition stays active",
-        flush=True
-    )
-
-    print(
-        "RE-ARM: silent when 2/3 condition breaks",
-        flush=True
-    )
-
-    print(
-        "NO 5-MINUTE LOGIC",
-        flush=True
-    )
-
-    print(
-        "NO RANKING LOGIC",
-        flush=True
-    )
-
-    print(
-        "NO $4M RESET LOGIC",
+        "2-OF-3 LOGIC: REMOVED",
         flush=True
     )
 
@@ -1240,7 +1060,6 @@ async def main():
     )
 
     async with async_playwright() as p:
-
         browser = await p.chromium.launch(
             headless=True,
             args=[
@@ -1268,19 +1087,16 @@ async def main():
         page = await context.new_page()
 
         while True:
-
             cycle_started = datetime.now(
                 IST
             )
 
             try:
-
                 await scan_once(
                     page
                 )
 
             except Exception as exc:
-
                 print(
                     f"\n[SCAN FAILED] "
                     f"{now_ist()} | "
