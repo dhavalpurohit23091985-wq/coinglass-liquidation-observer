@@ -17,8 +17,8 @@ URL = "https://www.coinglass.com/liquidations"
 
 SCAN_SECONDS = 60
 
-# BTC only.
-TARGET_SYMBOLS = {"BTC"}
+# BTC, ETH and SOL.
+TARGET_SYMBOLS = {"BTC", "ETH", "SOL"}
 
 VALUE_THRESHOLD = 1_000_000.0
 
@@ -36,7 +36,7 @@ STATE_FILE = os.getenv(
 # STATE
 # ============================================================
 
-# BTC 4H signal state only.
+# BTC/ETH/SOL 4H signal state.
 states = {
     "VALUE": {},
 }
@@ -91,14 +91,14 @@ def load_states():
         if not isinstance(bucket, dict):
             bucket = {}
 
-        # Keep only BTC state.
+        # Keep only BTC/ETH/SOL state.
         cleaned = {}
 
         for symbol, state in bucket.items():
             symbol_upper = str(symbol).upper().strip()
 
-            if symbol_upper == "BTC":
-                cleaned["BTC"] = state
+            if symbol_upper in TARGET_SYMBOLS:
+                cleaned[symbol_upper] = state
 
         states["VALUE"] = cleaned
 
@@ -358,7 +358,7 @@ def update_value_state(symbol, long_4h, short_4h, price=0.0, allow_alert=True):
 
     if signal is None:
         if old.get("active"):
-            print(f"[CLEAR] BTC 4H | previous={old.get('side')} | gap={fmt_money(gap)} | {now_ist()}", flush=True)
+            print(f"[CLEAR] {symbol} 4H | previous={old.get('side')} | gap={fmt_money(gap)} | {now_ist()}", flush=True)
         states["VALUE"][symbol] = {"active": False, "side": None, "first_observed": None}
         save_states()
         return
@@ -368,19 +368,19 @@ def update_value_state(symbol, long_4h, short_4h, price=0.0, allow_alert=True):
         states["VALUE"][symbol] = {"active": True, "side": signal, "first_observed": first_time}
         save_states()
         if not allow_alert:
-            print(f"[BOOTSTRAP ACTIVE] BTC 4H | signal={signal} | stronger={stronger} | gap={fmt_money(gap)}", flush=True)
+            print(f"[BOOTSTRAP ACTIVE] {symbol} 4H | signal={signal} | stronger={stronger} | gap={fmt_money(gap)}", flush=True)
             return
-        title = f"COINGLASS BTC 4H {signal} | GAP {fmt_money(gap)}"
+        title = f"COINGLASS {symbol} 4H {signal} | GAP {fmt_money(gap)}"
         message = (
-            "COINGLASS BTC 4H LIQUIDATION\n\n"
-            f"BTC PRICE: {fmt_price(price)}\n"
+            f"COINGLASS {symbol} 4H LIQUIDATION\n\n"
+            f"{symbol} PRICE: {fmt_price(price)}\n"
             f"4H LONG: {fmt_money(long_4h)}\n"
             f"4H SHORT: {fmt_money(short_4h)}\n"
             f"DIFFERENCE: {fmt_money(gap)}\n"
             f"MORE LIQUIDATED: {stronger}\n\n"
             f"ALERT: {signal}"
         )
-        print(f"[NEW BTC 4H SIGNAL] {message}", flush=True)
+        print(f"[NEW {symbol} 4H SIGNAL] {message}", flush=True)
         send_pushover(title, message)
         return
 
@@ -392,10 +392,10 @@ def update_value_state(symbol, long_4h, short_4h, price=0.0, allow_alert=True):
     first_time = now_ist()
     states["VALUE"][symbol] = {"active": True, "side": signal, "first_observed": first_time}
     save_states()
-    title = f"COINGLASS BTC 4H {old_side}->{signal}"
+    title = f"COINGLASS {symbol} 4H {old_side}->{signal}"
     message = (
-        "COINGLASS BTC 4H LIQUIDATION\n\n"
-        f"BTC PRICE: {fmt_price(price)}\n"
+        f"COINGLASS {symbol} 4H LIQUIDATION\n\n"
+        f"{symbol} PRICE: {fmt_price(price)}\n"
         f"4H LONG: {fmt_money(long_4h)}\n"
         f"4H SHORT: {fmt_money(short_4h)}\n"
         f"DIFFERENCE: {fmt_money(gap)}\n"
@@ -403,7 +403,7 @@ def update_value_state(symbol, long_4h, short_4h, price=0.0, allow_alert=True):
         f"ALERT: {old_side} -> {signal}\n"
         f"PREVIOUS ACTIVE FOR: {previous_active_for}"
     )
-    print(f"[BTC 4H REVERSAL] {old_side}->{signal} | gap={fmt_money(gap)}", flush=True)
+    print(f"[{symbol} 4H REVERSAL] {old_side}->{signal} | gap={fmt_money(gap)}", flush=True)
     send_pushover(title, message)
 
 
@@ -522,7 +522,7 @@ def find_value_header(lines):
 
 
 # ============================================================
-# BTC 4H PARSER
+# BTC / ETH / SOL 4H PARSER
 # ============================================================
 
 def parse_value_rows(lines):
@@ -592,7 +592,7 @@ def parse_value_rows(lines):
             i += 1
             continue
 
-        # We only need BTC.
+        # We only need BTC, ETH and SOL.
         # Skip all other assets immediately.
         if symbol not in TARGET_SYMBOLS:
             i += 1
@@ -656,7 +656,7 @@ def parse_value_rows(lines):
             )
 
             print(
-                f"[PARSED] BTC | "
+                f"[PARSED] {symbol} | "
                 f"4H L={long_4h_raw} | "
                 f"4H S={short_4h_raw}",
                 flush=True,
@@ -666,7 +666,7 @@ def parse_value_rows(lines):
 
     if not results:
         raise RuntimeError(
-            "No BTC VALUE row parsed"
+            "No BTC/ETH/SOL VALUE rows parsed"
         )
 
     print(
@@ -681,20 +681,38 @@ def parse_value_rows(lines):
 
 
 # ============================================================
-# BTC 4H PROCESSING
+# BTC / ETH / SOL 4H PROCESSING
 # ============================================================
 
 def process_value_rows(rows, allow_alert=True):
-    print(f"\n[BTC 4H SCAN] {now_ist()} | rows={len(rows)}", flush=True)
+    print(f"\n[BTC/ETH/SOL 4H SCAN] {now_ist()} | rows={len(rows)}", flush=True)
+
     for row in rows:
-        if row.get("symbol") != "BTC":
+        symbol = str(row.get("symbol", "")).upper().strip()
+
+        if symbol not in TARGET_SYMBOLS:
             continue
+
         long_4h = float(row.get("long_4h", 0.0) or 0.0)
         short_4h = float(row.get("short_4h", 0.0) or 0.0)
         gap = abs(long_4h - short_4h)
         stronger = "LONG" if long_4h > short_4h else "SHORT" if short_4h > long_4h else "EVEN"
-        print(f"BTC 4H L={fmt_money(long_4h)} S={fmt_money(short_4h)} GAP={fmt_money(gap)} STRONGER={stronger}", flush=True)
-        update_value_state("BTC", long_4h, short_4h, price=row.get("price", 0.0), allow_alert=allow_alert)
+
+        print(
+            f"{symbol} 4H L={fmt_money(long_4h)} "
+            f"S={fmt_money(short_4h)} "
+            f"GAP={fmt_money(gap)} "
+            f"STRONGER={stronger}",
+            flush=True,
+        )
+
+        update_value_state(
+            symbol,
+            long_4h,
+            short_4h,
+            price=row.get("price", 0.0),
+            allow_alert=allow_alert,
+        )
 
 
 # ============================================================
@@ -776,7 +794,7 @@ async def scan_once(page):
 
         print(
             "[BOOTSTRAP COMPLETE] "
-            "Current BTC 4H state seeded; "
+            "Current BTC/ETH/SOL 4H states seeded; "
             "future fresh crosses/side changes "
             "can alert.",
             flush=True,
@@ -807,7 +825,7 @@ async def scan_once(page):
 
 async def main():
     print(
-        "COINGLASS BTC 4H "
+        "COINGLASS BTC/ETH/SOL 4H "
         "OBSERVER STARTING",
         flush=True,
     )
@@ -826,13 +844,13 @@ async def main():
     )
 
     print(
-        f"BTC 4H difference threshold: "
+        f"BTC/ETH/SOL 4H difference threshold: "
         f"{fmt_money(VALUE_THRESHOLD)}",
         flush=True,
     )
 
     print(
-        "MODE: BTC 4H LONG-vs-SHORT ONLY",
+        "MODE: BTC/ETH/SOL 4H LONG-vs-SHORT ONLY",
         flush=True,
     )
 
