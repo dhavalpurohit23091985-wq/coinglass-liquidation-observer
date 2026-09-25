@@ -17,8 +17,7 @@ URL = "https://www.coinglass.com/liquidations"
 
 SCAN_SECONDS = 60
 
-# BTC, ETH and SOL.
-TARGET_SYMBOLS = {"BTC", "ETH", "SOL"}
+TOP_N = 10
 
 VALUE_THRESHOLD = 1_000_000.0
 
@@ -32,18 +31,17 @@ STATE_FILE = os.getenv(
 ).strip()
 
 
+
 # ============================================================
 # STATE
 # ============================================================
 
-# BTC/ETH/SOL 4H signal state.
-states = {
-    "VALUE": {},
-}
-
-# Persist state locally so a normal worker restart can restore
-# the previous VALUE side instead of treating the current side
-# as a fresh bootstrap.
+# Per-symbol selected qualifying state.
+# A coin gets ONE vote:
+#   4H first if abs(Long-Short) >= $1M
+#   otherwise 12H if abs(Long-Short) >= $1M
+#   otherwise no vote.
+states = {"VALUE": {}}
 bootstrap_complete = False
 
 
@@ -52,83 +50,39 @@ def save_states():
         "states": states,
         "bootstrap_complete": bool(bootstrap_complete),
     }
-
     tmp_path = f"{STATE_FILE}.tmp"
-
     try:
         with open(tmp_path, "w", encoding="utf-8") as handle:
-            json.dump(
-                payload,
-                handle,
-                ensure_ascii=False,
-                indent=2,
-            )
-
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
         os.replace(tmp_path, STATE_FILE)
-
     except Exception as exc:
-        print(
-            f"[STATE SAVE FAILED] "
-            f"{type(exc).__name__}: {exc}",
-            flush=True,
-        )
+        print(f"[STATE SAVE FAILED] {type(exc).__name__}: {exc}", flush=True)
 
 
 def load_states():
     global states, bootstrap_complete
-
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
 
-        loaded = payload.get("states")
-
-        if not isinstance(loaded, dict):
-            raise ValueError("states missing")
-
-        bucket = loaded.get("VALUE", {})
-
-        if not isinstance(bucket, dict):
-            bucket = {}
-
-        # Keep only BTC/ETH/SOL state.
-        cleaned = {}
-
-        for symbol, state in bucket.items():
-            symbol_upper = str(symbol).upper().strip()
-
-            if symbol_upper in TARGET_SYMBOLS:
-                cleaned[symbol_upper] = state
-
-        states["VALUE"] = cleaned
-
-        bootstrap_complete = bool(
-            payload.get("bootstrap_complete", True)
-        )
+        loaded = payload.get("states", {})
+        bucket = loaded.get("VALUE", {}) if isinstance(loaded, dict) else {}
+        states["VALUE"] = bucket if isinstance(bucket, dict) else {}
+        bootstrap_complete = bool(payload.get("bootstrap_complete", True))
 
         print(
-            f"[STATE RESTORED] "
-            f"VALUE={len(states['VALUE'])} | "
+            f"[STATE RESTORED] VALUE={len(states['VALUE'])} | "
             f"bootstrap_complete={bootstrap_complete}",
             flush=True,
         )
-
         return True
 
     except FileNotFoundError:
-        print(
-            "[STATE RESTORE] No saved state found; "
-            "first scan will bootstrap.",
-            flush=True,
-        )
-
+        print("[STATE RESTORE] No saved state found; first scan will bootstrap.", flush=True)
     except Exception as exc:
-        print(
-            f"[STATE RESTORE FAILED] "
-            f"{type(exc).__name__}: {exc}",
-            flush=True,
-        )
+        print(f"[STATE RESTORE FAILED] {type(exc).__name__}: {exc}", flush=True)
 
+    states["VALUE"] = {}
     bootstrap_complete = False
     return False
 
@@ -142,134 +96,57 @@ def now_ist_dt():
 
 
 def now_ist():
-    return now_ist_dt().strftime(
-        "%d-%m-%Y %H:%M:%S IST"
-    )
-
-
-def format_duration(start_time):
-    if not start_time:
-        return "0S"
-
-    try:
-        start_dt = datetime.strptime(
-            start_time,
-            "%d-%m-%Y %H:%M:%S IST",
-        ).replace(tzinfo=IST)
-
-        total_seconds = max(
-            0,
-            int(
-                (
-                    now_ist_dt() - start_dt
-                ).total_seconds()
-            ),
-        )
-
-        hours, remainder = divmod(
-            total_seconds,
-            3600,
-        )
-
-        minutes, seconds = divmod(
-            remainder,
-            60,
-        )
-
-        if hours > 0:
-            return f"{hours}H {minutes}M {seconds}S"
-
-        if minutes > 0:
-            return f"{minutes}M {seconds}S"
-
-        return f"{seconds}S"
-
-    except Exception:
-        return "0S"
+    return now_ist_dt().strftime("%d-%m-%Y %H:%M:%S IST")
 
 
 def clean_text(value):
     if value is None:
         return ""
-
     return " ".join(
-        str(value)
-        .replace("\xa0", " ")
-        .replace("\u200b", "")
-        .split()
+        str(value).replace("\xa0", " ").replace("\u200b", "").split()
     )
 
 
 def parse_number(text):
     s = clean_text(text).upper()
-
     if not s:
         return 0.0
 
-    s = (
-        s.replace("$", "")
-        .replace(",", "")
-        .replace("−", "-")
-    )
-
-    match = re.search(
-        r"-?\d+(?:\.\d+)?",
-        s,
-    )
-
+    s = s.replace("$", "").replace(",", "").replace("−", "-")
+    match = re.search(r"-?\d+(?:\.\d+)?", s)
     if not match:
         return 0.0
 
     value = float(match.group())
-
     if "B" in s:
         value *= 1_000_000_000
-
     elif "M" in s:
         value *= 1_000_000
-
     elif "K" in s:
         value *= 1_000
-
     return value
 
 
 def fmt_money(value):
     value = float(value)
-
     if abs(value) >= 1_000_000_000:
         return f"${value / 1_000_000_000:.2f}B"
-
     if abs(value) >= 1_000_000:
         return f"${value / 1_000_000:.2f}M"
-
     if abs(value) >= 1_000:
         return f"${value / 1_000:.2f}K"
-
     return f"${value:.2f}"
 
 
 def fmt_price(value):
     value = float(value or 0.0)
-
     if value <= 0:
         return "N/A"
-
     if value >= 1000:
         return f"${value:,.2f}"
-
     if value >= 1:
-        return (
-            f"${value:,.4f}"
-            .rstrip("0")
-            .rstrip(".")
-        )
-
-    return (
-        f"${value:,.8f}"
-        .rstrip("0")
-        .rstrip(".")
-    )
+        return f"${value:,.4f}".rstrip("0").rstrip(".")
+    return f"${value:,.8f}".rstrip("0").rstrip(".")
 
 
 # ============================================================
@@ -277,23 +154,12 @@ def fmt_price(value):
 # ============================================================
 
 def pushover_ready():
-    return bool(
-        PUSHOVER_USER_KEY
-        and PUSHOVER_APP_TOKEN
-    )
+    return bool(PUSHOVER_USER_KEY and PUSHOVER_APP_TOKEN)
 
 
-def send_pushover(
-    title,
-    message,
-):
+def send_pushover(title, message):
     if not pushover_ready():
-        print(
-            "[PUSHOVER] Not configured - "
-            "notification skipped",
-            flush=True,
-        )
-
+        print("[PUSHOVER] Not configured - notification skipped", flush=True)
         return False
 
     try:
@@ -308,103 +174,85 @@ def send_pushover(
             },
             timeout=15,
         )
-
         if response.ok:
-            print(
-                f"[PUSHOVER SENT] {title}",
-                flush=True,
-            )
-
+            print(f"[PUSHOVER SENT] {title}", flush=True)
             return True
-
-        print(
-            f"[PUSHOVER FAILED] "
-            f"HTTP {response.status_code}",
-            flush=True,
-        )
-
+        print(f"[PUSHOVER FAILED] HTTP {response.status_code}", flush=True)
     except Exception as exc:
-        print(
-            f"[PUSHOVER FAILED] "
-            f"{type(exc).__name__}: {exc}",
-            flush=True,
-        )
-
+        print(f"[PUSHOVER FAILED] {type(exc).__name__}: {exc}", flush=True)
     return False
 
 
-# ============================================================
-# VALUE STATE / THRESHOLD ENGINE
-# ============================================================
+def selected_vote(row):
+    """Return one selected vote per coin: 4H first, otherwise 12H, otherwise NONE."""
+    l4 = float(row.get("long_4h", 0.0) or 0.0)
+    s4 = float(row.get("short_4h", 0.0) or 0.0)
+    g4_signed = l4 - s4
 
-def update_value_state(symbol, long_4h, short_4h, price=0.0, allow_alert=True):
-    symbol = symbol.upper().strip()
-    signed_gap = float(long_4h or 0.0) - float(short_4h or 0.0)
-    gap = abs(signed_gap)
+    if abs(g4_signed) >= VALUE_THRESHOLD:
+        return {
+            "qualified": True,
+            "timeframe": "4H",
+            "side": "LONG" if g4_signed > 0 else "SHORT",
+            "gap": abs(g4_signed),
+        }
 
-    # Trading direction is opposite the liquidated side:
-    # more LONG liquidations -> SELL; more SHORT liquidations -> BUY.
-    if signed_gap >= VALUE_THRESHOLD:
-        signal = "SELL"
-        stronger = "LONG"
-    elif signed_gap <= -VALUE_THRESHOLD:
-        signal = "BUY"
-        stronger = "SHORT"
+    l12 = float(row.get("long_12h", 0.0) or 0.0)
+    s12 = float(row.get("short_12h", 0.0) or 0.0)
+    g12_signed = l12 - s12
+
+    if abs(g12_signed) >= VALUE_THRESHOLD:
+        return {
+            "qualified": True,
+            "timeframe": "12H",
+            "side": "LONG" if g12_signed > 0 else "SHORT",
+            "gap": abs(g12_signed),
+        }
+
+    return {"qualified": False, "timeframe": None, "side": None, "gap": 0.0}
+
+
+def vote_key(vote):
+    if not vote.get("qualified"):
+        return "NONE"
+    return f"{vote['timeframe']}:{vote['side']}"
+
+
+def build_top10_message(rows, trigger_symbols):
+    long_votes = 0
+    short_votes = 0
+    lines = ["COINGLASS TOP-10 | $1M GAP VOTE", ""]
+
+    for rank, row in enumerate(rows[:TOP_N], start=1):
+        symbol = row["symbol"]
+        vote = selected_vote(row)
+
+        if vote["qualified"]:
+            if vote["side"] == "LONG":
+                long_votes += 1
+            else:
+                short_votes += 1
+            status = f"{vote['side']} {fmt_money(vote['gap'])} ({vote['timeframe']})"
+        else:
+            status = "NO $1M GAP"
+
+        marker = "  << TRIGGER" if symbol in trigger_symbols else ""
+        lines.append(f"{rank}. {symbol}: {status}{marker}")
+
+    lines.extend([
+        "",
+        f"LONG GAP >=$1M: {long_votes}/{len(rows[:TOP_N])}",
+        f"SHORT GAP >=$1M: {short_votes}/{len(rows[:TOP_N])}",
+    ])
+
+    if long_votes > short_votes:
+        lines.append(f"COUNT WINNER: LONG {long_votes} vs SHORT {short_votes}")
+    elif short_votes > long_votes:
+        lines.append(f"COUNT WINNER: SHORT {short_votes} vs LONG {long_votes}")
     else:
-        signal = None
-        stronger = "NONE"
+        lines.append(f"COUNT WINNER: TIE {long_votes}-{short_votes}")
 
-    old = states["VALUE"].get(symbol, {"active": False, "side": None, "first_observed": None})
-
-    if signal is None:
-        if old.get("active"):
-            print(f"[CLEAR] {symbol} 4H | previous={old.get('side')} | gap={fmt_money(gap)} | {now_ist()}", flush=True)
-        states["VALUE"][symbol] = {"active": False, "side": None, "first_observed": None}
-        save_states()
-        return
-
-    if not old.get("active"):
-        first_time = now_ist()
-        states["VALUE"][symbol] = {"active": True, "side": signal, "first_observed": first_time}
-        save_states()
-        if not allow_alert:
-            print(f"[BOOTSTRAP ACTIVE] {symbol} 4H | signal={signal} | stronger={stronger} | gap={fmt_money(gap)}", flush=True)
-            return
-        title = f"COINGLASS {symbol} 4H {signal} | GAP {fmt_money(gap)}"
-        message = (
-            f"COINGLASS {symbol} 4H LIQUIDATION\n\n"
-            f"{symbol} PRICE: {fmt_price(price)}\n"
-            f"4H LONG: {fmt_money(long_4h)}\n"
-            f"4H SHORT: {fmt_money(short_4h)}\n"
-            f"DIFFERENCE: {fmt_money(gap)}\n"
-            f"MORE LIQUIDATED: {stronger}\n\n"
-            f"ALERT: {signal}"
-        )
-        print(f"[NEW {symbol} 4H SIGNAL] {message}", flush=True)
-        send_pushover(title, message)
-        return
-
-    if old.get("side") == signal:
-        return
-
-    old_side = old.get("side")
-    previous_active_for = format_duration(old.get("first_observed"))
-    first_time = now_ist()
-    states["VALUE"][symbol] = {"active": True, "side": signal, "first_observed": first_time}
-    save_states()
-    title = f"COINGLASS {symbol} 4H {old_side}->{signal}"
-    message = (
-        f"COINGLASS {symbol} 4H LIQUIDATION\n\n"
-        f"{symbol} PRICE: {fmt_price(price)}\n"
-        f"4H LONG: {fmt_money(long_4h)}\n"
-        f"4H SHORT: {fmt_money(short_4h)}\n"
-        f"DIFFERENCE: {fmt_money(gap)}\n"
-        f"MORE LIQUIDATED: {stronger}\n\n"
-        f"ALERT: {old_side} -> {signal}\n"
-        f"PREVIOUS ACTIVE FOR: {previous_active_for}"
-    )
-    print(f"[{symbol} 4H REVERSAL] {old_side}->{signal} | gap={fmt_money(gap)}", flush=True)
-    send_pushover(title, message)
+    return "\n".join(lines), long_votes, short_votes
 
 
 # ============================================================
@@ -451,20 +299,16 @@ async def wait_for_liquidation_section(page):
     )
 
 
+
 # ============================================================
 # VALUE PARSER HELPERS
 # ============================================================
 
 def is_number_like(text):
     s = clean_text(text)
-
     return bool(
         re.fullmatch(
-            r"[-+−]?\$?"
-            r"\d[\d,]*"
-            r"(?:\.\d+)?"
-            r"(?:[KMB])?"
-            r"%?",
+            r"[-+−]?\$?\d[\d,]*(?:\.\d+)?(?:[KMB])?%?",
             s,
             flags=re.I,
         )
@@ -473,246 +317,169 @@ def is_number_like(text):
 
 def is_symbol_like(text):
     s = clean_text(text).upper()
-
-    if not re.fullmatch(
-        r"[A-Z0-9]{2,15}",
-        s,
-    ):
+    if not re.fullmatch(r"[A-Z0-9]{2,15}", s):
         return False
 
     ignored = {
-        "PRICE",
-        "ASSETS",
-        "LONG",
-        "SHORT",
-        "RANKING",
-        "VALUE",
-        "TRADES",
-        "TOTAL",
-        "LIQUIDATIONS",
-        "USD",
-        "USDT",
-        "24H",
-        "12H",
-        "4H",
-        "1H",
+        "PRICE", "ASSETS", "LONG", "SHORT", "RANKING", "VALUE",
+        "TRADES", "TOTAL", "LIQUIDATIONS", "USD", "USDT",
+        "24H", "12H", "4H", "1H",
     }
-
     return s not in ignored
 
 
 def find_value_header(lines):
     for i in range(len(lines)):
-        block = " ".join(
-            lines[i:i + 20]
-        ).lower()
-
+        block = " ".join(lines[i:i + 20]).lower()
         if (
             "assets" in block
             and "1h long" in block
             and "1h short" in block
             and "4h long" in block
             and "4h short" in block
+            and "12h long" in block
+            and "12h short" in block
         ):
             return i
-
-    raise RuntimeError(
-        "VALUE liquidation header not found"
-    )
+    raise RuntimeError("VALUE liquidation header not found")
 
 
 # ============================================================
-# BTC / ETH / SOL 4H PARSER
+# DYNAMIC TOP-10 PARSER
 # ============================================================
 
 def parse_value_rows(lines):
     header_index = find_value_header(lines)
-
-    search_lines = lines[
-        header_index + 1:
-        header_index + 350
-    ]
+    search_lines = lines[header_index + 1: header_index + 500]
 
     ignored_exact = {
-        "Ranking",
-        "Assets",
-        "Price",
-        "Price (24h%)",
-        "1h Long",
-        "1h Short",
-        "4h Long",
-        "4h Short",
-        "12h Long",
-        "12h Short",
-        "24h Long",
-        "24h Short",
-        "Liquidation Value",
-        "Liquidation Trades",
+        "Ranking", "Assets", "Price", "Price (24h%)",
+        "1h Long", "1h Short", "4h Long", "4h Short",
+        "12h Long", "12h Short", "24h Long", "24h Short",
+        "Liquidation Value", "Liquidation Trades",
     }
-
-    filtered = [
-        item
-        for item in search_lines
-        if item not in ignored_exact
-    ]
+    filtered = [item for item in search_lines if item not in ignored_exact]
 
     results = []
     seen = set()
-
     i = 0
 
-    while i < len(filtered):
+    while i < len(filtered) and len(results) < TOP_N:
         current = filtered[i]
-
         symbol = None
         symbol_index = None
+        rank = None
 
         if (
             re.fullmatch(r"#?\d+", current)
             and i + 1 < len(filtered)
-            and is_symbol_like(
-                filtered[i + 1]
-            )
+            and is_symbol_like(filtered[i + 1])
         ):
-            symbol = (
-                filtered[i + 1]
-                .upper()
-            )
-
+            rank = int(current.lstrip("#"))
+            symbol = filtered[i + 1].upper()
             symbol_index = i + 1
-
         elif is_symbol_like(current):
             symbol = current.upper()
             symbol_index = i
 
-        if (
-            symbol is None
-            or symbol in seen
-        ):
-            i += 1
-            continue
-
-        # We only need BTC, ETH and SOL.
-        # Skip all other assets immediately.
-        if symbol not in TARGET_SYMBOLS:
+        if symbol is None or symbol in seen:
             i += 1
             continue
 
         numbers = []
-
-        for j in range(
-            symbol_index + 1,
-            min(
-                symbol_index + 20,
-                len(filtered),
-            ),
-        ):
+        for j in range(symbol_index + 1, min(symbol_index + 20, len(filtered))):
             candidate = filtered[j]
 
             if (
                 j > symbol_index + 2
-                and re.fullmatch(
-                    r"#?\d+",
-                    candidate,
-                )
+                and re.fullmatch(r"#?\d+", candidate)
                 and j + 1 < len(filtered)
-                and is_symbol_like(
-                    filtered[j + 1]
-                )
+                and is_symbol_like(filtered[j + 1])
             ):
                 break
 
             if is_number_like(candidate):
                 numbers.append(candidate)
 
+        # Expected numeric order after symbol:
+        # price, 24h%, 1hL, 1hS, 4hL, 4hS, 12hL, 12hS, 24hL, 24hS...
         if len(numbers) >= 8:
-            long_raw = numbers[2]
-            short_raw = numbers[3]
-
-            long_4h_raw = numbers[4]
-            short_4h_raw = numbers[5]
-
-            if (
-                "$" not in long_raw
-                and "$" not in short_raw
-                and not re.search(
-                    r"[KMB]",
-                    long_raw + short_raw,
-                    flags=re.I,
-                )
-            ):
-                i += 1
-                continue
-
+            row = {
+                "rank": rank if rank is not None else len(results) + 1,
+                "symbol": symbol,
+                "price": parse_number(numbers[0]),
+                "long_4h": parse_number(numbers[4]),
+                "short_4h": parse_number(numbers[5]),
+                "long_12h": parse_number(numbers[6]),
+                "short_12h": parse_number(numbers[7]),
+            }
+            results.append(row)
             seen.add(symbol)
 
-            results.append(
-                {
-                    "symbol": symbol,
-                    "price": parse_number(numbers[0]),
-                    "long_4h": parse_number(long_4h_raw),
-                    "short_4h": parse_number(short_4h_raw),
-                }
-            )
-
             print(
-                f"[PARSED] {symbol} | "
-                f"4H L={long_4h_raw} | "
-                f"4H S={short_4h_raw}",
+                f"[PARSED] #{row['rank']} {symbol} | "
+                f"4H L={numbers[4]} S={numbers[5]} | "
+                f"12H L={numbers[6]} S={numbers[7]}",
                 flush=True,
             )
 
         i += 1
 
-    if not results:
-        raise RuntimeError(
-            "No BTC/ETH/SOL VALUE rows parsed"
-        )
+    if len(results) < TOP_N:
+        raise RuntimeError(f"Only {len(results)}/{TOP_N} Top-10 VALUE rows parsed")
 
+    results = results[:TOP_N]
     print(
-        f"[DEBUG] TARGET VALUE rows="
-        f"{len(results)} | "
-        f"symbols="
-        f"{','.join(row['symbol'] for row in results)}",
+        f"[DEBUG] TOP-{TOP_N} rows={len(results)} | "
+        f"symbols={','.join(row['symbol'] for row in results)}",
         flush=True,
     )
-
     return results
 
 
 # ============================================================
-# BTC / ETH / SOL 4H PROCESSING
+# TOP-10 4H -> 12H VOTE / ALERT ENGINE
 # ============================================================
 
 def process_value_rows(rows, allow_alert=True):
-    print(f"\n[BTC/ETH/SOL 4H SCAN] {now_ist()} | rows={len(rows)}", flush=True)
+    current_symbols = {row["symbol"] for row in rows[:TOP_N]}
+    trigger_symbols = []
 
-    for row in rows:
-        symbol = str(row.get("symbol", "")).upper().strip()
+    # Drop state for coins that are no longer in the current Top-10.
+    for symbol in list(states["VALUE"].keys()):
+        if symbol not in current_symbols:
+            states["VALUE"].pop(symbol, None)
 
-        if symbol not in TARGET_SYMBOLS:
-            continue
+    for row in rows[:TOP_N]:
+        symbol = row["symbol"]
+        vote = selected_vote(row)
+        new_key = vote_key(vote)
 
-        long_4h = float(row.get("long_4h", 0.0) or 0.0)
-        short_4h = float(row.get("short_4h", 0.0) or 0.0)
-        gap = abs(long_4h - short_4h)
-        stronger = "LONG" if long_4h > short_4h else "SHORT" if short_4h > long_4h else "EVEN"
+        old = states["VALUE"].get(symbol, {})
+        old_key = old.get("key", "NONE")
 
-        print(
-            f"{symbol} 4H L={fmt_money(long_4h)} "
-            f"S={fmt_money(short_4h)} "
-            f"GAP={fmt_money(gap)} "
-            f"STRONGER={stronger}",
-            flush=True,
-        )
+        # Alert on a fresh qualifying state or a selected side/timeframe change.
+        # No repeated alert while the same selected 4H/12H side remains active.
+        if allow_alert and new_key != "NONE" and new_key != old_key:
+            trigger_symbols.append(symbol)
 
-        update_value_state(
-            symbol,
-            long_4h,
-            short_4h,
-            price=row.get("price", 0.0),
-            allow_alert=allow_alert,
-        )
+        states["VALUE"][symbol] = {
+            "key": new_key,
+            "qualified": vote["qualified"],
+            "timeframe": vote["timeframe"],
+            "side": vote["side"],
+        }
+
+    save_states()
+
+    message, long_votes, short_votes = build_top10_message(rows, trigger_symbols)
+
+    print("\n" + message, flush=True)
+
+    if trigger_symbols and allow_alert:
+        trigger_text = ",".join(trigger_symbols)
+        title = f"COINGLASS TOP-10 | $1M GAP | {trigger_text}"
+        send_pushover(title, message)
 
 
 # ============================================================
@@ -723,97 +490,41 @@ async def scan_once(page):
     global bootstrap_complete
 
     print(
-        "\n"
-        "############################################################\n"
+        "\n############################################################\n"
         f"[SCAN START] {now_ist()}\n"
         "############################################################",
         flush=True,
     )
 
-    # Fresh navigation every 1-minute cycle.
-    response = await page.goto(
-        URL,
-        wait_until="domcontentloaded",
-        timeout=60000,
-    )
+    response = await page.goto(URL, wait_until="domcontentloaded", timeout=60000)
+    status = response.status if response else None
+    print(f"[HTTP] status={status}", flush=True)
+    print(f"[HTTP] final_url={page.url}", flush=True)
 
-    status = (
-        response.status
-        if response
-        else None
-    )
-
-    print(
-        f"[HTTP] status={status}",
-        flush=True,
-    )
-
-    print(
-        f"[HTTP] final_url={page.url}",
-        flush=True,
-    )
-
-    if (
-        response is not None
-        and response.status >= 400
-    ):
-        raise RuntimeError(
-            f"CoinGlass HTTP "
-            f"{response.status}"
-        )
+    if response is not None and response.status >= 400:
+        raise RuntimeError(f"CoinGlass HTTP {response.status}")
 
     await page.wait_for_timeout(8000)
+    print(f"[PAGE] title={await page.title()}", flush=True)
+    await wait_for_liquidation_section(page)
 
-    print(
-        f"[PAGE] title="
-        f"{await page.title()}",
-        flush=True,
-    )
+    value_lines = await get_rendered_lines(page)
+    value_rows = parse_value_rows(value_lines)
 
-    await wait_for_liquidation_section(
-        page
-    )
-
-    # VALUE ONLY
-    value_lines = await get_rendered_lines(
-        page
-    )
-
-    value_rows = parse_value_rows(
-        value_lines
-    )
-
-    process_value_rows(
-        value_rows,
-        allow_alert=bootstrap_complete,
-    )
+    process_value_rows(value_rows, allow_alert=bootstrap_complete)
 
     if not bootstrap_complete:
         bootstrap_complete = True
         save_states()
-
         print(
-            "[BOOTSTRAP COMPLETE] "
-            "Current BTC/ETH/SOL 4H states seeded; "
-            "future fresh crosses/side changes "
-            "can alert.",
+            "[BOOTSTRAP COMPLETE] Current Top-10 vote states seeded; "
+            "future fresh $1M qualifications/changes can alert.",
             flush=True,
         )
 
     print(
-        "\n"
-        "############################################################",
-        flush=True,
-    )
-
-    print(
-        f"[SCAN OK] "
-        f"{now_ist()} | "
-        f"VALUE={len(value_rows)}",
-        flush=True,
-    )
-
-    print(
+        "\n############################################################\n"
+        f"[SCAN OK] {now_ist()} | TOP10={len(value_rows)}\n"
         "############################################################",
         flush=True,
     )
@@ -824,41 +535,14 @@ async def scan_once(page):
 # ============================================================
 
 async def main():
-    print(
-        "COINGLASS BTC/ETH/SOL 4H "
-        "OBSERVER STARTING",
-        flush=True,
-    )
-
+    print("COINGLASS TOP-10 ADVANCED OBSERVER STARTING", flush=True)
     load_states()
 
-    print(
-        f"URL: {URL}",
-        flush=True,
-    )
-
-    print(
-        f"SCAN: every "
-        f"{SCAN_SECONDS} seconds",
-        flush=True,
-    )
-
-    print(
-        f"BTC/ETH/SOL 4H difference threshold: "
-        f"{fmt_money(VALUE_THRESHOLD)}",
-        flush=True,
-    )
-
-    print(
-        "MODE: BTC/ETH/SOL 4H LONG-vs-SHORT ONLY",
-        flush=True,
-    )
-
-    print(
-        f"PUSHOVER: "
-        f"{'READY' if pushover_ready() else 'NOT CONFIGURED'}",
-        flush=True,
-    )
+    print(f"URL: {URL}", flush=True)
+    print(f"SCAN: every {SCAN_SECONDS} seconds", flush=True)
+    print(f"THRESHOLD: {fmt_money(VALUE_THRESHOLD)}", flush=True)
+    print("MODE: TOP-10 | 4H FIRST -> 12H FALLBACK | ONE VOTE PER COIN", flush=True)
+    print(f"PUSHOVER: {'READY' if pushover_ready() else 'NOT CONFIGURED'}", flush=True)
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
