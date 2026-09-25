@@ -219,38 +219,93 @@ def vote_key(vote):
 
 
 def build_top10_message(rows, trigger_symbols):
+    """
+    Clean alert layout:
+      1) Trigger coin(s) first
+      2) Top-10: LONG | SHORT | DIFF | timeframe
+      3) LONG/SHORT qualifying counts + winner
+
+    For each coin:
+      - use 4H values when 4H abs gap >= $1M
+      - otherwise use 12H values when 12H abs gap >= $1M
+      - otherwise show 4H values and mark the diff as < $1M
+    """
     long_votes = 0
     short_votes = 0
-    lines = ["COINGLASS TOP-10 | $1M GAP VOTE", ""]
 
-    for rank, row in enumerate(rows[:TOP_N], start=1):
+    # ---------- Trigger section ----------
+    lines = []
+    if trigger_symbols:
+        for symbol in trigger_symbols:
+            row = next((r for r in rows[:TOP_N] if r["symbol"] == symbol), None)
+            if row is None:
+                continue
+
+            vote = selected_vote(row)
+            if vote["qualified"]:
+                lines.append(f"🚨 TRIGGER: {symbol}")
+                lines.append(
+                    f"{vote['timeframe']} {vote['side']} GAP: {fmt_money(vote['gap'])}"
+                )
+                lines.append("")
+
+    lines.append("COINGLASS TOP-10 STATUS")
+    lines.append("")
+
+    # ---------- Full Top-10 status ----------
+    for row in rows[:TOP_N]:
         symbol = row["symbol"]
         vote = selected_vote(row)
+
+        if vote["qualified"] and vote["timeframe"] == "4H":
+            long_value = float(row.get("long_4h", 0.0) or 0.0)
+            short_value = float(row.get("short_4h", 0.0) or 0.0)
+            timeframe = "4H"
+        elif vote["qualified"] and vote["timeframe"] == "12H":
+            long_value = float(row.get("long_12h", 0.0) or 0.0)
+            short_value = float(row.get("short_12h", 0.0) or 0.0)
+            timeframe = "12H"
+        else:
+            # No qualifying vote: show current 4H values because 4H is primary.
+            long_value = float(row.get("long_4h", 0.0) or 0.0)
+            short_value = float(row.get("short_4h", 0.0) or 0.0)
+            timeframe = "4H"
+
+        signed_gap = long_value - short_value
+        gap = abs(signed_gap)
 
         if vote["qualified"]:
             if vote["side"] == "LONG":
                 long_votes += 1
             else:
                 short_votes += 1
-            status = f"{vote['side']} {fmt_money(vote['gap'])} ({vote['timeframe']})"
+            diff_text = f"{fmt_money(gap)} {vote['side']}"
         else:
-            status = "NO $1M GAP"
+            diff_text = "<$1M"
 
-        marker = "  << TRIGGER" if symbol in trigger_symbols else ""
-        lines.append(f"{rank}. {symbol}: {status}{marker}")
+        trigger_note = "  << TRIGGER" if symbol in trigger_symbols else ""
 
+        lines.append(
+            f"{symbol} | LONG {fmt_money(long_value)} | "
+            f"SHORT {fmt_money(short_value)} | "
+            f"DIFF {diff_text} | {timeframe}{trigger_note}"
+        )
+
+    # ---------- Vote summary ----------
+    total = len(rows[:TOP_N])
     lines.extend([
         "",
-        f"LONG GAP >=$1M: {long_votes}/{len(rows[:TOP_N])}",
-        f"SHORT GAP >=$1M: {short_votes}/{len(rows[:TOP_N])}",
+        f"LONG >= $1M : {long_votes}/{total}",
+        f"SHORT >= $1M: {short_votes}/{total}",
+        "",
     ])
 
     if long_votes > short_votes:
-        lines.append(f"COUNT WINNER: LONG {long_votes} vs SHORT {short_votes}")
+        lines.append(f"WINNER: LONG {long_votes} vs SHORT {short_votes}")
     elif short_votes > long_votes:
-        lines.append(f"COUNT WINNER: SHORT {short_votes} vs LONG {long_votes}")
+        lines.append(f"WINNER: SHORT {short_votes} vs LONG {long_votes}")
     else:
-        lines.append(f"COUNT WINNER: TIE {long_votes}-{short_votes}")
+        lines.append(f"WINNER: TIE {long_votes} vs SHORT {short_votes}")
 
     return "\n".join(lines), long_votes, short_votes
 
