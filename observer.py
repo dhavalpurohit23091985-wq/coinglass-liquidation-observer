@@ -220,84 +220,64 @@ def vote_key(vote):
 
 def build_top10_message(rows, trigger_symbols):
     """
-    Clean alert layout:
-      1) Trigger coin(s) first
-      2) Top-10: LONG | SHORT | DIFF | timeframe
-      3) LONG/SHORT qualifying counts + winner
-
-    For each coin:
-      - use 4H values when 4H abs gap >= $1M
-      - otherwise use 12H values when 12H abs gap >= $1M
-      - otherwise show 4H values and mark the diff as < $1M
+    Ultra-clean alert:
+      - Trigger coin(s) first.
+      - Then show ONLY coins whose selected gap is >= $1M.
+      - 4H has priority; 12H is fallback only when 4H does not qualify.
+      - No raw Long/Short liquidation values.
+      - Bottom: LONG count, SHORT count, winner.
     """
+    qualified = []
     long_votes = 0
     short_votes = 0
 
-    # ---------- Trigger section ----------
-    lines = []
-    if trigger_symbols:
-        for symbol in trigger_symbols:
-            row = next((r for r in rows[:TOP_N] if r["symbol"] == symbol), None)
-            if row is None:
-                continue
-
-            vote = selected_vote(row)
-            if vote["qualified"]:
-                lines.append(f"🚨 TRIGGER: {symbol}")
-                lines.append(
-                    f"{vote['timeframe']} {vote['side']} GAP: {fmt_money(vote['gap'])}"
-                )
-                lines.append("")
-
-    lines.append("COINGLASS TOP-10 STATUS")
-    lines.append("")
-
-    # ---------- Full Top-10 status ----------
     for row in rows[:TOP_N]:
-        symbol = row["symbol"]
         vote = selected_vote(row)
+        if not vote["qualified"]:
+            continue
 
-        if vote["qualified"] and vote["timeframe"] == "4H":
-            long_value = float(row.get("long_4h", 0.0) or 0.0)
-            short_value = float(row.get("short_4h", 0.0) or 0.0)
-            timeframe = "4H"
-        elif vote["qualified"] and vote["timeframe"] == "12H":
-            long_value = float(row.get("long_12h", 0.0) or 0.0)
-            short_value = float(row.get("short_12h", 0.0) or 0.0)
-            timeframe = "12H"
+        item = {
+            "symbol": row["symbol"],
+            "side": vote["side"],
+            "gap": vote["gap"],
+            "timeframe": vote["timeframe"],
+        }
+        qualified.append(item)
+
+        if vote["side"] == "LONG":
+            long_votes += 1
         else:
-            # No qualifying vote: show current 4H values because 4H is primary.
-            long_value = float(row.get("long_4h", 0.0) or 0.0)
-            short_value = float(row.get("short_4h", 0.0) or 0.0)
-            timeframe = "4H"
+            short_votes += 1
 
-        signed_gap = long_value - short_value
-        gap = abs(signed_gap)
+    lines = []
 
-        if vote["qualified"]:
-            if vote["side"] == "LONG":
-                long_votes += 1
-            else:
-                short_votes += 1
-            diff_text = f"{fmt_money(gap)} {vote['side']}"
-        else:
-            diff_text = "<$1M"
-
-        trigger_note = "  << TRIGGER" if symbol in trigger_symbols else ""
-
+    # Trigger(s) clearly at the top.
+    for symbol in trigger_symbols:
+        item = next((x for x in qualified if x["symbol"] == symbol), None)
+        if item is None:
+            continue
         lines.append(
-            f"{symbol} | LONG {fmt_money(long_value)} | "
-            f"SHORT {fmt_money(short_value)} | "
-            f"DIFF {diff_text} | {timeframe}{trigger_note}"
+            f"🚨 TRIGGER: {item['symbol']} — "
+            f"{fmt_money(item['gap'])} {item['side']} ({item['timeframe']})"
         )
 
-    # ---------- Vote summary ----------
-    total = len(rows[:TOP_N])
+    if trigger_symbols:
+        lines.append("")
+
+    lines.append("QUALIFIED >= $1M")
+    lines.append("")
+
+    # Only qualifying coins are shown.
+    for item in qualified:
+        lines.append(
+            f"{item['symbol']} | {fmt_money(item['gap'])} "
+            f"{item['side']} | {item['timeframe']}"
+        )
+
     lines.extend([
         "",
-        f"LONG >= $1M : {long_votes}/{total}",
-        f"SHORT >= $1M: {short_votes}/{total}",
-        "",
+        f"LONG : {long_votes}",
+        f"SHORT: {short_votes}",
     ])
 
     if long_votes > short_votes:
