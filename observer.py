@@ -52,6 +52,10 @@ STATE_FILE = os.getenv(
 #
 # BUY -> SELL allowed
 # SELL -> BUY allowed
+#
+# IMPORTANT:
+# A coin temporarily disappearing from one CoinGlass scan
+# DOES NOT delete/reset its remembered state.
 # ============================================================
 
 state = {}
@@ -545,12 +549,10 @@ def parse_coin_at(
 # ============================================================
 # PARSE TABLE
 #
-# We collect enough valid rows to obtain:
+# Current Top-10 is retained for notification snapshot.
 #
-# - current Top-10
-# - BTC separately if BTC is outside Top-10
-#
-# BTC is not duplicated if already inside Top-10.
+# Every valid parsed coin is monitored.
+# `seen` prevents duplicate rows.
 # ============================================================
 
 def parse_monitor_rows(lines):
@@ -603,14 +605,10 @@ def parse_monitor_rows(lines):
             f"need at least {TOP_N}"
         )
 
-    # Keep the current Top-10 visible in logs.
+    # Keep current Top-10 visible in logs.
     top10 = all_rows[:TOP_N]
 
-    # Monitor EVERY valid parsed coin from the CoinGlass table.
-    # This automatically includes the fixed coins and Top-10,
-    # with no duplicates because `seen` already de-duplicates rows.
-    # Therefore any parsed coin can trigger when its 24H gap
-    # reaches the existing $1M threshold.
+    # Monitor EVERY valid parsed coin from CoinGlass.
     monitor_rows = list(all_rows)
 
     print(
@@ -690,53 +688,42 @@ def get_signal(row):
 # ============================================================
 # PROCESS
 #
-# Example:
+# LOCKED RULE:
 #
-# BTC:
+# BTC/CL/etc:
 #
-# +$1.10M SHORT gap -> BUY alert
-# +$2.00M SHORT gap -> NO repeat
-# +$3.00M SHORT gap -> NO repeat
+# BUY -> BUY repeat = NO ALERT
+# SELL -> SELL repeat = NO ALERT
 #
-# Then:
+# BUY -> SELL = FRESH ALERT
+# SELL -> BUY = FRESH ALERT
 #
-# +$1.20M LONG gap -> SELL alert
+# Falling below $1M does NOT re-arm same side.
 #
-# Then BUY becomes eligible again.
+# Temporary absence from one parsed scan does NOT
+# delete/reset the remembered state.
 #
-# Falling below $1M does NOT by itself
-# re-arm the same side.
-#
-# Only an opposite-side trigger changes state.
+# Only an actual opposite-side trigger changes state.
 # ============================================================
 
 def process_rows(rows):
-    current_symbols = {
-        row["symbol"]
-        for row in rows
-    }
-
     changed = False
-
-    # Remove coins no longer monitored.
-    # BTC remains because it is separately monitored.
-    for old_symbol in list(
-        state.keys()
-    ):
-        if old_symbol not in current_symbols:
-            print(
-                f"[STATE REMOVE] "
-                f"{old_symbol} no longer monitored",
-                flush=True
-            )
-
-            del state[
-                old_symbol
-            ]
-
-            changed = True
-
     fresh_alerts = []
+
+    # IMPORTANT FIX:
+    #
+    # OLD CODE REMOVED remembered states whenever a symbol was
+    # absent from the current parsed scan.
+    #
+    # That could cause:
+    #
+    # CL BUY
+    # -> CL temporarily missing
+    # -> remembered BUY deleted
+    # -> CL returns BUY
+    # -> incorrectly treated as FRESH BUY again
+    #
+    # We DO NOT remove missing symbols anymore.
 
     for row in rows:
         symbol = row[
@@ -771,13 +758,13 @@ def process_rows(rows):
         )
 
         # Below $1M:
-        # do nothing.
-        # Previous direction remains remembered.
+        # Do nothing.
+        # Previous BUY/SELL remains remembered.
         if signal == "NONE":
             continue
 
         # Same direction:
-        # no repeat alert.
+        # NEVER send another alert.
         if signal == previous:
             print(
                 f"[{symbol}] "
@@ -786,7 +773,7 @@ def process_rows(rows):
             )
             continue
 
-        # Fresh initial signal OR opposite signal.
+        # Fresh initial signal OR genuine opposite-side signal.
         state[
             symbol
         ] = signal
@@ -835,93 +822,165 @@ def process_rows(rows):
         )
         return
 
-    # Compact alert: fresh trigger(s) first, then current Top-10 snapshot.
+    # ========================================================
+    # COMPACT ALERT
+    # Fresh trigger(s) first
+    # Then current Top-10 snapshot
+    # ========================================================
+
     def compact_money(value):
         value = float(value)
+
         if abs(value) >= 1_000_000_000:
             return f"{value / 1_000_000_000:.2f}B"
+
         if abs(value) >= 1_000_000:
             return f"{value / 1_000_000:.2f}M"
+
         if abs(value) >= 1_000:
             return f"{value / 1_000:.2f}K"
+
         return f"{value:.0f}"
 
     message_lines = []
 
+    # Fresh trigger(s) at TOP.
     for item in fresh_alerts:
         previous = item["previous"]
+
         transition = (
             f"{previous}->{item['signal']}"
-            if previous in ("BUY", "SELL")
+            if previous in (
+                "BUY",
+                "SELL"
+            )
             else item["signal"]
         )
+
         message_lines.append(
-            f"🔥 {item['symbol']} FRESH {item['signal']} | {transition}"
+            f"🔥 {item['symbol']} FRESH "
+            f"{item['signal']} | {transition}"
         )
 
-    top10_rows = list(rows[:TOP_N])
+    # Current CoinGlass Top-10 snapshot.
+    top10_rows = list(
+        rows[:TOP_N]
+    )
+
     total_long = 0.0
     total_short = 0.0
+
     buy_count = 0
     sell_count = 0
 
     for row in top10_rows:
-        symbol = row["symbol"]
-        long_value = float(row["long_24h"])
-        short_value = float(row["short_24h"])
-        signal, _ = get_signal(row)
+        symbol = row[
+            "symbol"
+        ]
+
+        long_value = float(
+            row["long_24h"]
+        )
+
+        short_value = float(
+            row["short_24h"]
+        )
+
+        signal, _ = get_signal(
+            row
+        )
 
         total_long += long_value
         total_short += short_value
 
         if signal == "BUY":
             buy_count += 1
+
         elif signal == "SELL":
             sell_count += 1
 
-        signed_gap = short_value - long_value
-        if abs(signed_gap) >= 1_000_000:
-            gap_text = f"{signed_gap / 1_000_000:+.2f}M"
-        elif abs(signed_gap) >= 1_000:
-            gap_text = f"{signed_gap / 1_000:+.0f}K"
-        else:
-            gap_text = f"{signed_gap:+.0f}"
-
-        message_lines.append(
-            f"{symbol} L{compact_money(long_value)} "
-            f"S{compact_money(short_value)} | {gap_text} | {signal}"
+        signed_gap = (
+            short_value
+            - long_value
         )
 
-    total_difference = total_short - total_long
+        if abs(signed_gap) >= 1_000_000:
+            gap_text = (
+                f"{signed_gap / 1_000_000:+.2f}M"
+            )
+
+        elif abs(signed_gap) >= 1_000:
+            gap_text = (
+                f"{signed_gap / 1_000:+.0f}K"
+            )
+
+        else:
+            gap_text = (
+                f"{signed_gap:+.0f}"
+            )
+
+        message_lines.append(
+            f"{symbol} "
+            f"L{compact_money(long_value)} "
+            f"S{compact_money(short_value)} "
+            f"| {gap_text} | {signal}"
+        )
+
+    # ========================================================
+    # TOTAL
+    # ========================================================
+
+    total_difference = (
+        total_short
+        - total_long
+    )
+
     if total_difference > 0:
         gap_side = "SHORT"
+
     elif total_difference < 0:
         gap_side = "LONG"
+
     else:
         gap_side = "EVEN"
 
     message_lines.append(
         f"TOTAL L{compact_money(total_long)} | "
         f"S{compact_money(total_short)} | "
-        f"GAP {compact_money(abs(total_difference))} {gap_side}"
+        f"GAP {compact_money(abs(total_difference))} "
+        f"{gap_side}"
     )
+
+    # ========================================================
+    # BUY / SELL COUNT
+    # ========================================================
 
     if buy_count > sell_count:
         winner = "BUY"
+
     elif sell_count > buy_count:
         winner = "SELL"
+
     else:
         winner = "TIE"
 
     message_lines.append(
-        f"{buy_count} BUY | {sell_count} SELL | WINNER {winner}"
+        f"{buy_count} BUY | "
+        f"{sell_count} SELL | "
+        f"WINNER {winner}"
     )
 
-    message = "\n".join(message_lines)
-    title = "24H $1M LIQUIDATION ALERT"
+    message = "\n".join(
+        message_lines
+    )
+
+    title = (
+        "24H $1M LIQUIDATION ALERT"
+    )
 
     print(
-        "\n============================================================\n"
+        "\n"
+        "============================================================\n"
         f"{title}\n"
         "============================================================\n"
         f"{message}\n"
@@ -929,7 +988,10 @@ def process_rows(rows):
         flush=True
     )
 
-    send_pushover(title, message)
+    send_pushover(
+        title,
+        message
+    )
 
 
 # ============================================================
@@ -1059,6 +1121,11 @@ async def main():
 
     print(
         "DROP BELOW $1M: NO ALERT / STATE KEPT",
+        flush=True
+    )
+
+    print(
+        "TEMPORARILY MISSING COIN: STATE KEPT",
         flush=True
     )
 
