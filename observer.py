@@ -603,41 +603,15 @@ def parse_monitor_rows(lines):
             f"need at least {TOP_N}"
         )
 
+    # Keep the current Top-10 visible in logs.
     top10 = all_rows[:TOP_N]
-    row_by_symbol = {
-        row["symbol"]: row
-        for row in all_rows
-    }
 
-    # Dynamic Top-10 stays exactly as before.
-    # Fixed symbols are added even when outside Top-10.
-    # A symbol appearing in both groups is monitored only once.
-    monitor_rows = list(top10)
-    monitored_symbols = {
-        row["symbol"]
-        for row in monitor_rows
-    }
-
-    for fixed_symbol in FIXED_SYMBOLS:
-        if fixed_symbol in monitored_symbols:
-            continue
-
-        fixed_row = row_by_symbol.get(
-            fixed_symbol
-        )
-
-        if fixed_row is not None:
-            monitor_rows.append(
-                fixed_row
-            )
-            monitored_symbols.add(
-                fixed_symbol
-            )
-        else:
-            print(
-                f"[WARNING] Fixed coin {fixed_symbol} row not found",
-                flush=True
-            )
+    # Monitor EVERY valid parsed coin from the CoinGlass table.
+    # This automatically includes the fixed coins and Top-10,
+    # with no duplicates because `seen` already de-duplicates rows.
+    # Therefore any parsed coin can trigger when its 24H gap
+    # reaches the existing $1M threshold.
+    monitor_rows = list(all_rows)
 
     print(
         "[TOP-10] "
@@ -651,6 +625,11 @@ def parse_monitor_rows(lines):
     print(
         "[FIXED] "
         + ", ".join(FIXED_SYMBOLS),
+        flush=True
+    )
+
+    print(
+        f"[ALL COINS MONITORED] {len(monitor_rows)}",
         flush=True
     )
 
@@ -1005,7 +984,7 @@ async def main():
     print(
         "\n"
         "============================================================\n"
-        "COINGLASS FIXED + TOP-10 24H $1M OBSERVER\n"
+        "COINGLASS ALL-COINS 24H $1M OBSERVER\n"
         "============================================================",
         flush=True
     )
