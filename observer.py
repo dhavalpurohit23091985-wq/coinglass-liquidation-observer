@@ -17,6 +17,7 @@ URL = "https://www.coinglass.com/liquidations"
 
 SCAN_SECONDS = 60
 TOP_N = 10
+FIXED_SYMBOLS = ("BTC", "SOL", "ETH", "ZEC", "NEAR", "XRP", "HYPE")
 GAP_THRESHOLD = 1_000_000.0
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -602,37 +603,39 @@ def parse_monitor_rows(lines):
             f"need at least {TOP_N}"
         )
 
-    top10 = all_rows[
-        :TOP_N
-    ]
+    top10 = all_rows[:TOP_N]
+    row_by_symbol = {
+        row["symbol"]: row
+        for row in all_rows
+    }
 
-    monitor_rows = list(
-        top10
-    )
-
-    # BTC separately monitored even if
-    # it is not currently in the Top-10.
-    if not any(
-        row["symbol"] == "BTC"
+    # Dynamic Top-10 stays exactly as before.
+    # Fixed symbols are added even when outside Top-10.
+    # A symbol appearing in both groups is monitored only once.
+    monitor_rows = list(top10)
+    monitored_symbols = {
+        row["symbol"]
         for row in monitor_rows
-    ):
-        btc_row = next(
-            (
-                row
-                for row in all_rows
-                if row["symbol"] == "BTC"
-            ),
-            None
+    }
+
+    for fixed_symbol in FIXED_SYMBOLS:
+        if fixed_symbol in monitored_symbols:
+            continue
+
+        fixed_row = row_by_symbol.get(
+            fixed_symbol
         )
 
-        if btc_row is not None:
-            monitor_rows.insert(
-                0,
-                btc_row
+        if fixed_row is not None:
+            monitor_rows.append(
+                fixed_row
+            )
+            monitored_symbols.add(
+                fixed_symbol
             )
         else:
             print(
-                "[WARNING] BTC row not found",
+                f"[WARNING] Fixed coin {fixed_symbol} row not found",
                 flush=True
             )
 
@@ -642,6 +645,12 @@ def parse_monitor_rows(lines):
             row["symbol"]
             for row in top10
         ),
+        flush=True
+    )
+
+    print(
+        "[FIXED] "
+        + ", ".join(FIXED_SYMBOLS),
         flush=True
     )
 
@@ -996,7 +1005,7 @@ async def main():
     print(
         "\n"
         "============================================================\n"
-        "COINGLASS BTC + TOP-10 24H $1M OBSERVER\n"
+        "COINGLASS FIXED + TOP-10 24H $1M OBSERVER\n"
         "============================================================",
         flush=True
     )
