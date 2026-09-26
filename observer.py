@@ -835,59 +835,93 @@ def process_rows(rows):
         )
         return
 
-    sections = []
+    # Compact alert: fresh trigger(s) first, then current Top-10 snapshot.
+    def compact_money(value):
+        value = float(value)
+        if abs(value) >= 1_000_000_000:
+            return f"{value / 1_000_000_000:.2f}B"
+        if abs(value) >= 1_000_000:
+            return f"{value / 1_000_000:.2f}M"
+        if abs(value) >= 1_000:
+            return f"{value / 1_000:.2f}K"
+        return f"{value:.0f}"
+
+    message_lines = []
 
     for item in fresh_alerts:
-        symbol = item[
-            "symbol"
-        ]
+        previous = item["previous"]
+        transition = (
+            f"{previous}->{item['signal']}"
+            if previous in ("BUY", "SELL")
+            else item["signal"]
+        )
+        message_lines.append(
+            f"🔥 {item['symbol']} FRESH {item['signal']} | {transition}"
+        )
 
-        signal = item[
-            "signal"
-        ]
+    top10_rows = list(rows[:TOP_N])
+    total_long = 0.0
+    total_short = 0.0
+    buy_count = 0
+    sell_count = 0
 
-        previous = item[
-            "previous"
-        ]
+    for row in top10_rows:
+        symbol = row["symbol"]
+        long_value = float(row["long_24h"])
+        short_value = float(row["short_24h"])
+        signal, _ = get_signal(row)
 
-        if previous in (
-            "BUY",
-            "SELL"
-        ):
-            transition = (
-                f"{previous} -> {signal}"
-            )
+        total_long += long_value
+        total_short += short_value
+
+        if signal == "BUY":
+            buy_count += 1
+        elif signal == "SELL":
+            sell_count += 1
+
+        signed_gap = short_value - long_value
+        if abs(signed_gap) >= 1_000_000:
+            gap_text = f"{signed_gap / 1_000_000:+.2f}M"
+        elif abs(signed_gap) >= 1_000:
+            gap_text = f"{signed_gap / 1_000:+.0f}K"
         else:
-            transition = signal
+            gap_text = f"{signed_gap:+.0f}"
 
-        section = (
-            f"{item['emoji']} "
-            f"{symbol} {signal}\n"
-            f"24H LONG: "
-            f"{fmt_money(item['long'])}\n"
-            f"24H SHORT: "
-            f"{fmt_money(item['short'])}\n"
-            f"GAP: "
-            f"{fmt_money(item['gap'])} "
-            f"{item['side_text']}\n"
-            f"STATE: {transition}"
+        message_lines.append(
+            f"{symbol} L{compact_money(long_value)} "
+            f"S{compact_money(short_value)} | {gap_text} | {signal}"
         )
 
-        sections.append(
-            section
-        )
+    total_difference = total_short - total_long
+    if total_difference > 0:
+        gap_side = "SHORT"
+    elif total_difference < 0:
+        gap_side = "LONG"
+    else:
+        gap_side = "EVEN"
 
-    message = "\n\n".join(
-        sections
+    message_lines.append(
+        f"TOTAL L{compact_money(total_long)} | "
+        f"S{compact_money(total_short)} | "
+        f"GAP {compact_money(abs(total_difference))} {gap_side}"
     )
 
-    title = (
-        "24H $1M LIQUIDATION ALERT"
+    if buy_count > sell_count:
+        winner = "BUY"
+    elif sell_count > buy_count:
+        winner = "SELL"
+    else:
+        winner = "TIE"
+
+    message_lines.append(
+        f"{buy_count} BUY | {sell_count} SELL | WINNER {winner}"
     )
+
+    message = "\n".join(message_lines)
+    title = "24H $1M LIQUIDATION ALERT"
 
     print(
-        "\n"
-        "============================================================\n"
+        "\n============================================================\n"
         f"{title}\n"
         "============================================================\n"
         f"{message}\n"
@@ -895,10 +929,7 @@ def process_rows(rows):
         flush=True
     )
 
-    send_pushover(
-        title,
-        message
-    )
+    send_pushover(title, message)
 
 
 # ============================================================
