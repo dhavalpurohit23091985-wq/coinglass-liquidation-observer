@@ -17,13 +17,22 @@ URL = "https://www.coinglass.com/inflow-outflow-history"
 
 SCAN_SECONDS = 30
 
-# +$100M BUY condition / -$100M SELL condition
+# LOCKED:
+# +$100M = BUY condition
+# -$100M = SELL condition
 THRESHOLD = 100_000_000.0
 
 IST = ZoneInfo("Asia/Kolkata")
 
-PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY", "").strip()
-PUSHOVER_APP_TOKEN = os.getenv("PUSHOVER_APP_TOKEN", "").strip()
+PUSHOVER_USER_KEY = os.getenv(
+    "PUSHOVER_USER_KEY",
+    ""
+).strip()
+
+PUSHOVER_APP_TOKEN = os.getenv(
+    "PUSHOVER_APP_TOKEN",
+    ""
+).strip()
 
 STATE_FILE = "/tmp/btc_netflow_state.json"
 
@@ -35,7 +44,7 @@ STATE_FILE = "/tmp/btc_netflow_state.json"
 def default_state():
     return {
         "running_total": 0.0,
-        "direction": "NONE",       # NONE / BUY / SELL
+        "direction": "NONE",
         "last_timestamp": "",
         "last_value": 0.0,
         "last_trigger": "NONE",
@@ -46,57 +55,93 @@ def default_state():
 def load_state():
     try:
         if os.path.exists(STATE_FILE):
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
+            with open(
+                STATE_FILE,
+                "r",
+                encoding="utf-8"
+            ) as f:
                 saved = json.load(f)
 
-            state = default_state()
-            state.update(saved)
-            return state
+            new_state = default_state()
+            new_state.update(saved)
+
+            return new_state
 
     except Exception as exc:
-        print(f"[STATE LOAD ERROR] {exc}", flush=True)
+        print(
+            f"[STATE LOAD ERROR] {exc}",
+            flush=True
+        )
 
     return default_state()
 
 
-def save_state(state):
+def save_state(current_state):
     try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2)
+        with open(
+            STATE_FILE,
+            "w",
+            encoding="utf-8"
+        ) as f:
+            json.dump(
+                current_state,
+                f,
+                indent=2
+            )
 
     except Exception as exc:
-        print(f"[STATE SAVE ERROR] {exc}", flush=True)
+        print(
+            f"[STATE SAVE ERROR] {exc}",
+            flush=True
+        )
 
 
 state = load_state()
 
 
 # ============================================================
-# MONEY HELPERS
+# MONEY
 # ============================================================
 
 def fmt_money(value):
-    sign = "+" if value > 0 else "-" if value < 0 else ""
-    n = abs(value)
+    sign = (
+        "+"
+        if value > 0
+        else "-"
+        if value < 0
+        else ""
+    )
 
-    if n >= 1_000_000_000:
-        return f"{sign}${n / 1_000_000_000:.2f}B"
+    number = abs(value)
 
-    if n >= 1_000_000:
-        return f"{sign}${n / 1_000_000:.2f}M"
+    if number >= 1_000_000_000:
+        return (
+            f"{sign}$"
+            f"{number / 1_000_000_000:.2f}B"
+        )
 
-    if n >= 1_000:
-        return f"{sign}${n / 1_000:.2f}K"
+    if number >= 1_000_000:
+        return (
+            f"{sign}$"
+            f"{number / 1_000_000:.2f}M"
+        )
 
-    return f"{sign}${n:.2f}"
+    if number >= 1_000:
+        return (
+            f"{sign}$"
+            f"{number / 1_000:.2f}K"
+        )
+
+    return f"{sign}${number:.2f}"
 
 
 def parse_money(text):
     if not text:
         return None
 
-    s = (
-        text.strip()
+    cleaned = (
+        text
+        .strip()
         .replace(",", "")
         .replace("−", "-")
         .replace("–", "-")
@@ -105,8 +150,10 @@ def parse_money(text):
     )
 
     match = re.search(
-        r"([+-]?)\$?([0-9]*\.?[0-9]+)([KMB]?)",
-        s,
+        r"([+-]?)\$?"
+        r"([0-9]*\.?[0-9]+)"
+        r"([KMB]?)",
+        cleaned,
         re.I
     )
 
@@ -117,7 +164,11 @@ def parse_money(text):
     number = float(match.group(2))
     suffix = match.group(3).upper()
 
-    sign = -1.0 if sign_text == "-" else 1.0
+    sign = (
+        -1.0
+        if sign_text == "-"
+        else 1.0
+    )
 
     multiplier = {
         "": 1.0,
@@ -126,7 +177,11 @@ def parse_money(text):
         "B": 1_000_000_000.0
     }[suffix]
 
-    return sign * number * multiplier
+    return (
+        sign
+        * number
+        * multiplier
+    )
 
 
 # ============================================================
@@ -134,9 +189,12 @@ def parse_money(text):
 # ============================================================
 
 def pushover(title, message):
-    if not PUSHOVER_USER_KEY or not PUSHOVER_APP_TOKEN:
+    if (
+        not PUSHOVER_USER_KEY
+        or not PUSHOVER_APP_TOKEN
+    ):
         print(
-            "[PUSHOVER] Keys missing - notification skipped",
+            "[PUSHOVER] Keys missing - skipped",
             flush=True
         )
         return
@@ -154,7 +212,8 @@ def pushover(title, message):
         )
 
         print(
-            f"[PUSHOVER] status={response.status_code}",
+            f"[PUSHOVER] "
+            f"status={response.status_code}",
             flush=True
         )
 
@@ -166,25 +225,115 @@ def pushover(title, message):
 
 
 # ============================================================
-# PAGE HELPERS
+# DEBUG
 # ============================================================
 
-async def wait_for_history_section(page):
+async def debug_page(page):
     """
-    Wait until BTC Futures Inflow/Outflow History appears.
+    Temporary diagnostic.
+
+    We need to know exactly what CoinGlass serves
+    to Render's headless Chromium.
     """
 
     try:
-        await page.get_by_text(
+        title = await page.title()
+    except Exception as exc:
+        title = f"ERROR: {exc}"
+
+    try:
+        current_url = page.url
+    except Exception as exc:
+        current_url = f"ERROR: {exc}"
+
+    try:
+        body = await page.locator(
+            "body"
+        ).inner_text(
+            timeout=10000
+        )
+    except Exception as exc:
+        body = f"BODY ERROR: {exc}"
+
+    clean_body = (
+        body
+        .replace("\r", " ")
+        .replace("\n", " | ")
+    )
+
+    print(
+        "====================================================",
+        flush=True
+    )
+
+    print(
+        "[COINGLASS DEBUG]",
+        flush=True
+    )
+
+    print(
+        f"[DEBUG TITLE] {title}",
+        flush=True
+    )
+
+    print(
+        f"[DEBUG URL] {current_url}",
+        flush=True
+    )
+
+    print(
+        f"[DEBUG BODY LENGTH] {len(body)}",
+        flush=True
+    )
+
+    print(
+        f"[DEBUG BODY START] "
+        f"{clean_body[:3000]}",
+        flush=True
+    )
+
+    print(
+        "[DEBUG CHECK]"
+        f" history="
+        f"{'BTC Futures Inflow/Outflow History' in body}"
+        f" | inflow="
+        f"{'Inflow/Outflow' in body}"
+        f" | 5minute="
+        f"{'5 minute' in body}"
+        f" | futures="
+        f"{'Futures' in body}"
+        f" | btc="
+        f"{'BTC' in body}",
+        flush=True
+    )
+
+    print(
+        "====================================================",
+        flush=True
+    )
+
+    return body
+
+
+# ============================================================
+# HISTORY SECTION
+# ============================================================
+
+async def wait_for_history_section(page):
+    try:
+        heading = page.get_by_text(
             "BTC Futures Inflow/Outflow History",
             exact=False
-        ).first.wait_for(
+        ).first
+
+        await heading.wait_for(
             state="visible",
-            timeout=30000
+            timeout=15000
         )
 
         print(
-            "[PAGE] BTC Futures Inflow/Outflow History found",
+            "[PAGE] BTC Futures "
+            "Inflow/Outflow History found",
             flush=True
         )
 
@@ -192,24 +341,26 @@ async def wait_for_history_section(page):
 
     except Exception:
         print(
-            "[PAGE WARNING] History heading not found",
+            "[PAGE WARNING] "
+            "History heading not found",
             flush=True
         )
 
         return False
 
 
+# ============================================================
+# 5-MINUTE DROPDOWN
+# ============================================================
+
 async def select_five_minute(page):
     """
-    IMPORTANT:
-    Every page reload may restore another interval.
+    LOCKED REQUIREMENT:
 
-    Therefore every scan:
-      1. locate History section
-      2. inspect buttons near that section
-      3. open interval dropdown
-      4. choose 5 minute
-      5. wait for table to refresh
+    Every reload:
+        reload page
+        -> select/confirm 5 minute
+        -> read latest BTC 5-minute contribution
     """
 
     print(
@@ -218,117 +369,127 @@ async def select_five_minute(page):
     )
 
     # --------------------------------------------------------
-    # Locate History heading
-    # --------------------------------------------------------
-
-    heading = page.get_by_text(
-        "BTC Futures Inflow/Outflow History",
-        exact=False
-    ).first
-
-    try:
-        await heading.wait_for(
-            state="visible",
-            timeout=15000
-        )
-
-    except Exception:
-        print(
-            "[INTERVAL ERROR] History heading unavailable",
-            flush=True
-        )
-        return False
-
-    # --------------------------------------------------------
-    # First method:
-    # find visible "5 minute" control/text around the page.
-    #
-    # If 5 minute is already selected after reload, this also
-    # confirms it.
+    # METHOD 1:
+    # visible exact text
     # --------------------------------------------------------
 
     try:
-        five_text = page.get_by_text(
+        candidates = page.get_by_text(
             "5 minute",
             exact=True
         )
 
-        count = await five_text.count()
+        count = await candidates.count()
+
+        print(
+            f"[INTERVAL DEBUG] "
+            f"5-minute text matches={count}",
+            flush=True
+        )
 
         if count > 0:
-            # Prefer the last visible match because chart controls
-            # are above and History controls are lower on the page.
-            for i in range(count - 1, -1, -1):
-                candidate = five_text.nth(i)
+            for i in range(
+                count - 1,
+                -1,
+                -1
+            ):
+                candidate = candidates.nth(i)
 
                 try:
-                    if await candidate.is_visible():
-                        await candidate.click(
-                            timeout=3000
-                        )
+                    if not await candidate.is_visible():
+                        continue
 
-                        await page.wait_for_timeout(700)
+                    print(
+                        f"[INTERVAL] "
+                        f"visible 5-minute control index={i}",
+                        flush=True
+                    )
 
-                        # Dropdown may have opened.
-                        # Look again for a visible 5-minute option.
-                        options = page.get_by_text(
+                    await candidate.click(
+                        timeout=3000
+                    )
+
+                    await page.wait_for_timeout(
+                        800
+                    )
+
+                    # If click opened a dropdown,
+                    # click the visible 5-minute option.
+                    new_candidates = (
+                        page.get_by_text(
                             "5 minute",
                             exact=True
                         )
+                    )
 
-                        option_count = await options.count()
+                    new_count = (
+                        await new_candidates.count()
+                    )
 
-                        if option_count > count:
-                            for j in range(
-                                option_count - 1,
-                                -1,
-                                -1
-                            ):
-                                option = options.nth(j)
-
-                                try:
-                                    if await option.is_visible():
-                                        await option.click(
-                                            timeout=3000
-                                        )
-
-                                        await page.wait_for_timeout(
-                                            2000
-                                        )
-
-                                        print(
-                                            "[INTERVAL] 5 minute selected",
-                                            flush=True
-                                        )
-
-                                        return True
-
-                                except Exception:
-                                    continue
-
-                        # If clicking did not create another option,
-                        # it may already have been selected.
-                        print(
-                            "[INTERVAL] 5 minute control confirmed",
-                            flush=True
+                    for j in range(
+                        new_count - 1,
+                        -1,
+                        -1
+                    ):
+                        option = (
+                            new_candidates.nth(j)
                         )
 
-                        return True
+                        try:
+                            if (
+                                await option.is_visible()
+                                and j != i
+                            ):
+                                await option.click(
+                                    timeout=3000
+                                )
+
+                                await page.wait_for_timeout(
+                                    2000
+                                )
+
+                                print(
+                                    "[INTERVAL] "
+                                    "5 minute selected",
+                                    flush=True
+                                )
+
+                                return True
+
+                        except Exception:
+                            continue
+
+                    # Could already be selected.
+                    print(
+                        "[INTERVAL] "
+                        "5 minute control confirmed",
+                        flush=True
+                    )
+
+                    return True
 
                 except Exception:
                     continue
 
-    except Exception:
-        pass
+    except Exception as exc:
+        print(
+            f"[INTERVAL METHOD1 ERROR] {exc}",
+            flush=True
+        )
 
     # --------------------------------------------------------
-    # Second method:
-    # inspect buttons/select-like controls after History heading.
+    # METHOD 2:
+    # buttons with interval names
     # --------------------------------------------------------
 
     try:
-        buttons = page.locator("button")
-        button_count = await buttons.count()
+        buttons = page.locator(
+            "button"
+        )
+
+        button_count = (
+            await buttons.count()
+        )
 
         possible_intervals = {
             "5 minute",
@@ -341,7 +502,9 @@ async def select_five_minute(page):
 
         interval_buttons = []
 
-        for i in range(button_count):
+        for i in range(
+            button_count
+        ):
             button = buttons.nth(i)
 
             try:
@@ -353,22 +516,34 @@ async def select_five_minute(page):
                 ).strip().lower()
 
                 if text in possible_intervals:
-                    interval_buttons.append(button)
+                    interval_buttons.append(
+                        button
+                    )
 
             except Exception:
                 continue
 
-        # History interval selector is normally lower on page,
-        # so use the last matching interval button.
+        print(
+            f"[INTERVAL DEBUG] "
+            f"interval buttons="
+            f"{len(interval_buttons)}",
+            flush=True
+        )
+
         if interval_buttons:
-            interval_button = interval_buttons[-1]
+            # History selector is lower on page,
+            # so prefer last interval control.
+            interval_button = (
+                interval_buttons[-1]
+            )
 
             current_text = (
                 await interval_button.inner_text()
             ).strip()
 
             print(
-                f"[INTERVAL] Current control={current_text}",
+                f"[INTERVAL] "
+                f"current={current_text}",
                 flush=True
             )
 
@@ -376,25 +551,29 @@ async def select_five_minute(page):
                 timeout=5000
             )
 
-            await page.wait_for_timeout(500)
+            await page.wait_for_timeout(
+                800
+            )
 
-            option = page.get_by_text(
+            options = page.get_by_text(
                 "5 minute",
                 exact=True
             )
 
-            option_count = await option.count()
+            option_count = (
+                await options.count()
+            )
 
             for i in range(
                 option_count - 1,
                 -1,
                 -1
             ):
-                item = option.nth(i)
+                option = options.nth(i)
 
                 try:
-                    if await item.is_visible():
-                        await item.click(
+                    if await option.is_visible():
+                        await option.click(
                             timeout=5000
                         )
 
@@ -403,7 +582,8 @@ async def select_five_minute(page):
                         )
 
                         print(
-                            "[INTERVAL] 5 minute selected via dropdown",
+                            "[INTERVAL] "
+                            "5 minute selected via dropdown",
                             flush=True
                         )
 
@@ -419,33 +599,51 @@ async def select_five_minute(page):
         )
 
     # --------------------------------------------------------
-    # Third method:
-    # native select elements, if CoinGlass changes rendering.
+    # METHOD 3:
+    # native select
     # --------------------------------------------------------
 
     try:
-        selects = page.locator("select")
-        select_count = await selects.count()
+        selects = page.locator(
+            "select"
+        )
 
-        for i in range(select_count):
+        select_count = (
+            await selects.count()
+        )
+
+        print(
+            f"[INTERVAL DEBUG] "
+            f"native selects={select_count}",
+            flush=True
+        )
+
+        for i in range(
+            select_count
+        ):
             select = selects.nth(i)
 
             try:
-                options = await select.locator(
-                    "option"
-                ).all_inner_texts()
+                options = (
+                    await select.locator(
+                        "option"
+                    ).all_inner_texts()
+                )
 
                 normalized = [
                     x.strip().lower()
                     for x in options
                 ]
 
-                if "5 minute" in normalized:
-                    idx = normalized.index(
-                        "5 minute"
-                    )
+                if "5 minute" not in normalized:
+                    continue
 
-                    values = await select.locator(
+                index = normalized.index(
+                    "5 minute"
+                )
+
+                values = (
+                    await select.locator(
                         "option"
                     ).evaluate_all(
                         """
@@ -454,30 +652,36 @@ async def select_five_minute(page):
                         )
                         """
                     )
+                )
 
-                    await select.select_option(
-                        values[idx]
-                    )
+                await select.select_option(
+                    values[index]
+                )
 
-                    await page.wait_for_timeout(
-                        2000
-                    )
+                await page.wait_for_timeout(
+                    2000
+                )
 
-                    print(
-                        "[INTERVAL] 5 minute selected via native select",
-                        flush=True
-                    )
+                print(
+                    "[INTERVAL] "
+                    "5 minute selected via native select",
+                    flush=True
+                )
 
-                    return True
+                return True
 
             except Exception:
                 continue
 
-    except Exception:
-        pass
+    except Exception as exc:
+        print(
+            f"[INTERVAL METHOD3 ERROR] {exc}",
+            flush=True
+        )
 
     print(
-        "[INTERVAL ERROR] Could not select/confirm 5 minute",
+        "[INTERVAL ERROR] "
+        "Could not select/confirm 5 minute",
         flush=True
     )
 
@@ -485,68 +689,87 @@ async def select_five_minute(page):
 
 
 # ============================================================
-# HISTORY DATA PARSER
+# PARSER
 # ============================================================
 
 async def get_latest_btc_5m(page):
     """
-    CoinGlass screenshot structure:
+    Expected rendered History structure:
 
-    Time | 5 minute | 15 minute | 30 minute | 1 hour | ...
+    Time
+    5 minute
+    15 minute
+    30 minute
+    1 hour
+    ...
 
-    CoinGlass does not necessarily use a normal HTML <table>.
-    Therefore we parse rendered page text.
+    09-27 06:15
+    +$xxx
+    ...
 
-    We want ONLY:
+    We only consume:
         latest timestamp
-        first money value after that timestamp = 5-minute value
+        first money value after timestamp
     """
 
     try:
         body_text = await page.locator(
             "body"
-        ).inner_text()
+        ).inner_text(
+            timeout=10000
+        )
 
     except Exception as exc:
         print(
             f"[BODY ERROR] {exc}",
             flush=True
         )
+
         return None, None
 
     if not body_text:
+        print(
+            "[BODY ERROR] Empty body",
+            flush=True
+        )
+
         return None, None
 
-    # --------------------------------------------------------
-    # Find History section only.
-    # This prevents chart/header numbers being mistaken as rows.
-    # --------------------------------------------------------
-
-    marker = "BTC Futures Inflow/Outflow History"
-
-    marker_index = body_text.find(marker)
-
-    if marker_index >= 0:
-        history_text = body_text[
-            marker_index:
-        ]
-    else:
-        history_text = body_text
-
-    # Normalize minus signs.
-    history_text = (
-        history_text
+    body_text = (
+        body_text
         .replace("−", "-")
         .replace("–", "-")
         .replace("—", "-")
     )
 
-    # --------------------------------------------------------
-    # Expected timestamp:
-    # 09-27 06:15
-    #
-    # Capture timestamp followed by nearby rendered content.
-    # --------------------------------------------------------
+    marker = (
+        "BTC Futures Inflow/Outflow History"
+    )
+
+    marker_index = (
+        body_text.find(marker)
+    )
+
+    if marker_index >= 0:
+        history_text = body_text[
+            marker_index:
+        ]
+
+        print(
+            "[PARSE] "
+            "History marker located",
+            flush=True
+        )
+
+    else:
+        history_text = body_text
+
+        print(
+            "[PARSE WARNING] "
+            "History marker not located; "
+            "using full body",
+            flush=True
+        )
 
     timestamp_pattern = re.compile(
         r"(\d{2}-\d{2}\s+\d{2}:\d{2})"
@@ -559,14 +782,15 @@ async def get_latest_btc_5m(page):
     )
 
     print(
-        f"[PARSE] timestamp matches={len(matches)}",
+        f"[PARSE] "
+        f"timestamp matches={len(matches)}",
         flush=True
     )
 
     if not matches:
-        preview = history_text[:1000].replace(
-            "\n",
-            " | "
+        preview = (
+            history_text[:1500]
+            .replace("\n", " | ")
         )
 
         print(
@@ -576,50 +800,57 @@ async def get_latest_btc_5m(page):
 
         return None, None
 
-    # Page is newest -> oldest.
-    # First timestamp after History heading = latest row.
+    # Newest row first.
     first_match = matches[0]
 
-    timestamp_text = first_match.group(1)
+    timestamp_text = (
+        first_match.group(1)
+    )
 
-    row_start = first_match.end()
+    row_start = (
+        first_match.end()
+    )
 
-    # End at next timestamp if present.
     if len(matches) > 1:
-        row_end = matches[1].start()
+        row_end = (
+            matches[1].start()
+        )
     else:
         row_end = min(
             len(history_text),
-            row_start + 500
+            row_start + 1000
         )
 
     row_text = history_text[
         row_start:row_end
     ]
 
-    # --------------------------------------------------------
-    # First money value after timestamp = 5-minute column.
-    # --------------------------------------------------------
-
     money_pattern = re.compile(
-        r"([+-]?\$[0-9,.]+(?:\.[0-9]+)?[KMB]?)",
+        r"([+-]?\$"
+        r"[0-9,.]+"
+        r"(?:\.[0-9]+)?"
+        r"[KMB]?)",
         re.I
     )
 
-    money_matches = money_pattern.findall(
-        row_text
+    money_matches = (
+        money_pattern.findall(
+            row_text
+        )
     )
 
     print(
-        f"[ROW] time={timestamp_text}"
-        f" | money_cells={len(money_matches)}",
+        f"[ROW] "
+        f"time={timestamp_text}"
+        f" | money_cells="
+        f"{len(money_matches)}",
         flush=True
     )
 
     if not money_matches:
-        debug_row = row_text[:500].replace(
-            "\n",
-            " | "
+        debug_row = (
+            row_text[:800]
+            .replace("\n", " | ")
         )
 
         print(
@@ -629,23 +860,38 @@ async def get_latest_btc_5m(page):
 
         return None, None
 
-    five_minute_text = money_matches[0]
+    five_minute_text = (
+        money_matches[0]
+    )
 
     value = parse_money(
         five_minute_text
     )
 
     if value is None:
+        print(
+            f"[PARSE ERROR] "
+            f"Could not parse "
+            f"{five_minute_text}",
+            flush=True
+        )
+
         return None, None
 
     print(
-        f"[LATEST] {timestamp_text}"
-        f" | BTC 5M={five_minute_text}"
-        f" | parsed={fmt_money(value)}",
+        f"[LATEST] "
+        f"{timestamp_text}"
+        f" | BTC 5M="
+        f"{five_minute_text}"
+        f" | parsed="
+        f"{fmt_money(value)}",
         flush=True
     )
 
-    return timestamp_text, value
+    return (
+        timestamp_text,
+        value
+    )
 
 
 # ============================================================
@@ -658,16 +904,18 @@ def process_new_contribution(
 ):
     global state
 
-    # --------------------------------------------------------
-    # SAME TIMESTAMP MUST NEVER BE ADDED TWICE
-    # --------------------------------------------------------
-
-    if timestamp_text == state["last_timestamp"]:
+    # Same timestamp must never be added twice.
+    if (
+        timestamp_text
+        == state["last_timestamp"]
+    ):
         print(
-            f"[SAME ROW] {timestamp_text}"
+            f"[SAME ROW] "
+            f"{timestamp_text}"
             f" already consumed - SKIP",
             flush=True
         )
+
         return
 
     old_total = float(
@@ -675,15 +923,21 @@ def process_new_contribution(
     )
 
     new_total = (
-        old_total + value
+        old_total
+        + value
     )
 
     print(
-        f"[NEW 5M] {timestamp_text}"
-        f" | contribution={fmt_money(value)}"
-        f" | before={fmt_money(old_total)}"
-        f" | after={fmt_money(new_total)}"
-        f" | state={state['direction']}",
+        f"[NEW 5M] "
+        f"{timestamp_text}"
+        f" | contribution="
+        f"{fmt_money(value)}"
+        f" | before="
+        f"{fmt_money(old_total)}"
+        f" | after="
+        f"{fmt_money(new_total)}"
+        f" | state="
+        f"{state['direction']}",
         flush=True
     )
 
@@ -691,7 +945,9 @@ def process_new_contribution(
         timestamp_text
     )
 
-    state["last_value"] = value
+    state["last_value"] = (
+        value
+    )
 
     state["running_total"] = (
         new_total
@@ -699,7 +955,9 @@ def process_new_contribution(
 
     trigger = None
 
-    direction = state["direction"]
+    direction = (
+        state["direction"]
+    )
 
     # ========================================================
     # STRICT ALTERNATION
@@ -715,29 +973,29 @@ def process_new_contribution(
 
     elif direction == "BUY":
 
-        # BUY -> only SELL eligible
-
+        # BUY -> only SELL
         if new_total <= -THRESHOLD:
             trigger = "SELL"
 
         elif new_total >= THRESHOLD:
             print(
-                "[BLOCKED] BUY already active."
-                " Waiting for -$100M SELL.",
+                "[BLOCKED] "
+                "BUY already active. "
+                "Waiting for SELL.",
                 flush=True
             )
 
     elif direction == "SELL":
 
-        # SELL -> only BUY eligible
-
+        # SELL -> only BUY
         if new_total >= THRESHOLD:
             trigger = "BUY"
 
         elif new_total <= -THRESHOLD:
             print(
-                "[BLOCKED] SELL already active."
-                " Waiting for +$100M BUY.",
+                "[BLOCKED] "
+                "SELL already active. "
+                "Waiting for BUY.",
                 flush=True
             )
 
@@ -746,9 +1004,13 @@ def process_new_contribution(
     # ========================================================
 
     if trigger:
-        trigger_total = new_total
+        trigger_total = (
+            new_total
+        )
 
-        state["direction"] = trigger
+        state["direction"] = (
+            trigger
+        )
 
         state["last_trigger"] = (
             trigger
@@ -759,8 +1021,7 @@ def process_new_contribution(
         )
 
         # LOCKED RULE:
-        # BUY/SELL trigger -> accumulated total = ZERO
-
+        # trigger -> accumulated total ZERO
         state["running_total"] = 0.0
 
         print(
@@ -772,7 +1033,8 @@ def process_new_contribution(
             f"[BTC NETFLOW {trigger}]"
             f" | time={timestamp_text}"
             f" | 5M={fmt_money(value)}"
-            f" | accumulated={fmt_money(trigger_total)}"
+            f" | accumulated="
+            f"{fmt_money(trigger_total)}"
             f" | RESET=$0",
             flush=True
         )
@@ -793,15 +1055,20 @@ def process_new_contribution(
             (
                 f"{trigger} CONDITION\n"
                 f"Time: {timestamp_text}\n"
-                f"5M contribution: {fmt_money(value)}\n"
-                f"Accumulated: {fmt_money(trigger_total)}\n"
+                f"5M contribution: "
+                f"{fmt_money(value)}\n"
+                f"Accumulated: "
+                f"{fmt_money(trigger_total)}\n"
                 f"Threshold: ±$100.00M\n"
                 f"Reset: $0\n"
-                f"Next eligible: {next_side}"
+                f"Next eligible: "
+                f"{next_side}"
             )
         )
 
-    save_state(state)
+    save_state(
+        state
+    )
 
 
 # ============================================================
@@ -816,37 +1083,43 @@ async def main():
     )
 
     print(
-        "BTC FUTURES NETFLOW OBSERVER",
+        "BTC FUTURES NETFLOW OBSERVER - DEBUG",
         flush=True
     )
 
     print(
-        "CoinGlass Futures Inflow/Outflow History",
+        "CoinGlass Futures "
+        "Inflow/Outflow History",
         flush=True
     )
 
     print(
-        "Dropdown: select 5 minute EVERY SCAN",
+        "Dropdown: select 5 minute "
+        "EVERY SCAN",
         flush=True
     )
 
     print(
-        "Contribution: BTC 5-minute Netflow",
+        "Contribution: BTC "
+        "5-minute Netflow",
         flush=True
     )
 
     print(
-        "Threshold: +$100M BUY / -$100M SELL",
+        "Threshold: "
+        "+$100M BUY / -$100M SELL",
         flush=True
     )
 
     print(
-        "Trigger: reset accumulated total to zero",
+        "Trigger: reset accumulated "
+        "total to zero",
         flush=True
     )
 
     print(
-        "State: strict BUY <-> SELL alternation",
+        "State: strict "
+        "BUY <-> SELL alternation",
         flush=True
     )
 
@@ -857,8 +1130,10 @@ async def main():
 
     print(
         f"[STATE]"
-        f" total={fmt_money(float(state['running_total']))}"
-        f" | direction={state['direction']}"
+        f" total="
+        f"{fmt_money(float(state['running_total']))}"
+        f" | direction="
+        f"{state['direction']}"
         f" | last_timestamp="
         f"{state['last_timestamp'] or 'NONE'}",
         flush=True
@@ -883,15 +1158,19 @@ async def main():
             locale="en-US"
         )
 
-        page = await context.new_page()
+        page = (
+            await context.new_page()
+        )
 
         while True:
 
             try:
-                now = datetime.now(
-                    IST
-                ).strftime(
-                    "%Y-%m-%d %H:%M:%S IST"
+                now = (
+                    datetime.now(IST)
+                    .strftime(
+                        "%Y-%m-%d "
+                        "%H:%M:%S IST"
+                    )
                 )
 
                 print(
@@ -899,17 +1178,32 @@ async def main():
                     flush=True
                 )
 
-                # Fresh reload each scan.
+                # --------------------------------------------
+                # FRESH PAGE LOAD
+                # --------------------------------------------
+
                 await page.goto(
                     URL,
                     wait_until="domcontentloaded",
                     timeout=90000
                 )
 
-                # Give CoinGlass JS time to render.
+                # CoinGlass is JS-heavy.
                 await page.wait_for_timeout(
                     6000
                 )
+
+                # --------------------------------------------
+                # TEMP DEBUG
+                # --------------------------------------------
+
+                await debug_page(
+                    page
+                )
+
+                # --------------------------------------------
+                # HISTORY SECTION
+                # --------------------------------------------
 
                 history_ok = (
                     await wait_for_history_section(
@@ -919,7 +1213,8 @@ async def main():
 
                 if not history_ok:
                     print(
-                        "[SCAN] History section unavailable",
+                        "[SCAN] "
+                        "History section unavailable",
                         flush=True
                     )
 
@@ -929,8 +1224,10 @@ async def main():
 
                     continue
 
-                # IMPORTANT:
-                # Select/confirm 5-minute dropdown after EVERY reload.
+                # --------------------------------------------
+                # SELECT 5 MINUTE EVERY RELOAD
+                # --------------------------------------------
+
                 interval_ok = (
                     await select_five_minute(
                         page
@@ -939,7 +1236,8 @@ async def main():
 
                 if not interval_ok:
                     print(
-                        "[SCAN] 5-minute selection failed",
+                        "[SCAN] "
+                        "5-minute selection failed",
                         flush=True
                     )
 
@@ -949,10 +1247,14 @@ async def main():
 
                     continue
 
-                # Wait for History data after selector update.
+                # Let table update after selector.
                 await page.wait_for_timeout(
                     2500
                 )
+
+                # --------------------------------------------
+                # READ LATEST BTC 5M
+                # --------------------------------------------
 
                 timestamp_text, value = (
                     await get_latest_btc_5m(
@@ -965,8 +1267,9 @@ async def main():
                     or value is None
                 ):
                     print(
-                        "[PARSE WARNING]"
-                        " Latest BTC 5M value not found",
+                        "[PARSE WARNING] "
+                        "Latest BTC 5M "
+                        "value not found",
                         flush=True
                     )
 
@@ -978,8 +1281,9 @@ async def main():
 
             except Exception as exc:
                 print(
-                    f"[SCAN ERROR]"
-                    f" {type(exc).__name__}: {exc}",
+                    f"[SCAN ERROR] "
+                    f"{type(exc).__name__}: "
+                    f"{exc}",
                     flush=True
                 )
 
