@@ -8,8 +8,7 @@ from playwright.async_api import async_playwright
 # ============================================================
 # CONFIG
 # ============================================================
-
-URL = "https://www.coinglass.com/inflow-outflow"
+URL = "https://www.coinglass.com/inflow-outflow-history"
 SCAN_SECONDS = 30
 
 IST = ZoneInfo("Asia/Kolkata")
